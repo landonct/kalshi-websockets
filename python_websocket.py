@@ -5,8 +5,11 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-
-
+from dotenv import load_dotenv
+load_dotenv(".env")
+KALSHI_ACCESS_KEY = os.getenv("KALSHI_ACCESS_KEY")
+PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH")
+PRIVATE_KEY = functions.load_private_key(PRIVATE_KEY_PATH)
 WS_URL = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
 AUTH_HEADERS = {
     "KALSHI-ACCESS-KEY": "your_api_key_id",
