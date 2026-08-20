@@ -1,19 +1,70 @@
 import asyncio
+import base64
 import websockets
 import json
+import os
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from dotenv import load_dotenv
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.backends import default_backend
 
+def load_private_key_from_file(file_path):
+    with open(file_path, "rb") as key_file:
+        private_key = serialization.load_pem_private_key(
+            key_file.read(),
+            password=None,  # or provide a password if your key is encrypted
+            backend=default_backend()
+        )
+    return private_key
 
+load_dotenv(".env")
+KALSHI_ACCESS_KEY = os.getenv("KALSHI_ACCESS_KEY")
+PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH")
+PRIVATE_KEY = load_private_key_from_file(PRIVATE_KEY_PATH)
 WS_URL = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
-AUTH_HEADERS = {
-    "KALSHI-ACCESS-KEY": "your_api_key_id",
-    "KALSHI-ACCESS-SIGNATURE": "generated_signature",
-    "KALSHI-ACCESS-TIMESTAMP": "timestamp_in_milliseconds",
-}
+MARKET_TICKER = "kxfeddecision-26sep"
 
+current_time = datetime.now()
+timestamp = current_time.timestamp()
+current_time_ms = int(timestamp * 1000)
+timestamp_str = str(current_time_ms)
+
+method = "GET"
+
+def sign_pss_text(private_key: rsa.RSAPrivateKey, text: str) -> str:
+    message = text.encode('utf-8')
+    try:
+        signature = private_key.sign(
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return base64.b64encode(signature).decode('utf-8')
+    except InvalidSignature as e:
+        raise ValueError("RSA sign PSS failed") from e
+
+def create_headers(private_key, method: str, path: str) -> dict:
+    """Create authentication headers"""
+    timestamp = str(int(datetime.now().timestamp() * 1000))
+    msg_string = timestamp + method + path.split('?')[0]
+    signature = sign_pss_text(private_key, msg_string)
+
+    return {
+        "Content-Type": "application/json",
+        "KALSHI-ACCESS-KEY": KALSHI_ACCESS_KEY,
+        "KALSHI-ACCESS-SIGNATURE": signature,
+        "KALSHI-ACCESS-TIMESTAMP": timestamp,
+    }
+    
+AUTH_HEADERS = create_headers(PRIVATE_KEY, method, "/trade-api/ws/v2")
 
 class Side(Enum):
     Ask = 1
