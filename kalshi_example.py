@@ -4,6 +4,7 @@ import base64
 import json
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import websockets
 from cryptography.exceptions import InvalidSignature
@@ -28,7 +29,7 @@ KALSHI_ACCESS_KEY = os.getenv("KALSHI_ACCESS_KEY")
 PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH")
 PRIVATE_KEY = load_private_key_from_file(PRIVATE_KEY_PATH)
 WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
-MARKET_TICKER = "KXATPCHALLENGERMATCH-26AUG19GOMCUE-GOM" # KXFEDDECISION-26SEP-H25" KXMLBGAME-26AUG191235DETPIT-DET
+MARKET_TICKER = "KXNFLGAME-26AUG22WASDET-WAS"  # KXFEDDECISION-26SEP-H25" KXMLBGAME-26AUG191235DETPIT-DET
 
 method = "GET"
 
@@ -50,7 +51,7 @@ def sign_pss_text(private_key: rsa.RSAPrivateKey, text: str) -> str:
 
 def create_headers(private_key, method: str, path: str) -> dict:
     """Create authentication headers"""
-    timestamp = str(int(datetime.now().timestamp() * 1000))
+    timestamp = str(int(datetime.now(ZoneInfo("America/New_York")).timestamp() * 1000))
     msg_string = timestamp + method + path.split("?")[0]
     signature = sign_pss_text(private_key, msg_string)
 
@@ -90,7 +91,7 @@ class OrderBook:
         book.clear()
         if levels is None:
             return
-        
+
         for level in levels:
             price, qty = level[0], float(level[1])
             book[str(price)] = qty
@@ -118,7 +119,7 @@ class OrderBook:
         """(price, qty) of the highest Yes bid, or None."""
         if not self.yes:
             return None
-        p = max(self.yes, key=float)
+        p = max({k: v for k, v in self.yes.items() if v >= 1}, key=float)
         return float(p), self.yes[p]
 
     def best_yes_ask(self):
@@ -126,7 +127,7 @@ class OrderBook:
         if not self.no:
             return None
         # Best No bid = highest No price -> tightest Yes ask = 1 - that price.
-        p = max(self.no, key=float)
+        p = max({k: v for k, v in self.no.items() if v >= 1}, key=float)
         return round(1.0 - float(p), 4), self.no[p]
 
     def book_imbalance(self) -> float | None:
@@ -181,7 +182,7 @@ class OFITracker:
         return val
 
 
-REFRESH_HZ = 4  # how many times per second to repaint the status line
+REFRESH_HZ = 10  # how many times per second to repaint the status line
 
 
 async def display_loop(book: "OrderBook", ofi: "OFITracker", stats: dict) -> None:
@@ -199,6 +200,7 @@ async def display_loop(book: "OrderBook", ofi: "OFITracker", stats: dict) -> Non
             continue
 
         bid, ask = book.best_yes_bid(), book.best_yes_ask()
+        bid_ask_spread = int(100 * (ask[0] - bid[0]))
         imb = book.book_imbalance()
         if not (bid and ask and imb is not None):
             continue
@@ -211,7 +213,7 @@ async def display_loop(book: "OrderBook", ofi: "OFITracker", stats: dict) -> Non
         line = (
             f"bid {bid[0]:.2f}x{bid[1]:>5.0f} | ask {ask[0]:.2f}x{ask[1]:>5.0f} "
             f"| imb {imb:+.3f} | OFI {ofi.ofi:+8.1f} "
-            f"| {rate:>4.0f} upd/s | last trade {last_trade}"
+            f"| {rate:>4.0f} upd/s | last trade {last_trade} | spread {bid_ask_spread:>2.0f}   "
         )
         # Pad to a fixed width so leftovers from a longer prior line are wiped.
         print(f"\r{line:<110}", end="", flush=True)
