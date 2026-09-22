@@ -1,17 +1,18 @@
 import asyncio
 import base64
-import websockets
 import json
 import os
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from dotenv import load_dotenv
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+import websockets
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from dotenv import load_dotenv
 
 
 def load_private_key_from_file(file_path):
@@ -190,10 +191,10 @@ async def process_message(message):
 
 
 def main():
-    trade = Trade(0.99, 10, Side.Bid)
-    print(trade)
+    # trade = Trade(0.99, 10, Side.Bid)
+    # print(trade)
 
-    rolling_window = TradeQueue(10)
+    # rolling_window = TradeQueue(10)
 
     subscribe_to_orderbook()
 
