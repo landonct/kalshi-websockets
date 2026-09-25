@@ -79,3 +79,5 @@ secret
 .env
 __pycache__
 *.txt
+data
+*.zip

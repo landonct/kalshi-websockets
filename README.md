@@ -1,2 +1,2 @@
-# coding-practice
-This is where I will practice my Java coding, along with other languages I want to learn. My code is stored in the folders, sorted by language.
+# About
+This project connects to and stores kalshi orderbook data. Currently, it can only store for 1 manual ticker. Still a WIP
