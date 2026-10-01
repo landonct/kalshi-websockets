@@ -1,6 +1,8 @@
 #! /bin/python
+import argparse
 import asyncio
 import json
+import logging
 import os
 import time
 from _io import TextIOWrapper
@@ -19,12 +21,38 @@ KALSHI_ACCESS_KEY = os.getenv("KALSHI_ACCESS_KEY")
 PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH")
 PRIVATE_KEY = load_private_key_from_file(PRIVATE_KEY_PATH)
 WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
-MARKET_TICKER = "KXUSLGAME-26SEP25PASTUL-PAS"  # KXFEDDECISION-26SEP-H25" KXMLBGAME-26AUG191235DETPIT-DET
+MARKET_TICKER = "KXNCAAFGAME-26SEP26MISSFLA-MISS"  # KXFEDDECISION-26SEP-H25" KXMLBGAME-26AUG191235DETPIT-DET
 LOG_FILE = Path("test.txt")
 
 method = "GET"
 
 REFRESH_HZ = 10  # how many times per second to repaint the status line
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    filename=f"kalshi_example_{datetime.now(tz=ZoneInfo('America/New_York')).strftime('%Y%m%d')}.log",
+    filemode="w",  # 'w' overwrites the file; 'a' appends (default)
+)
+LOGGER = logging.getLogger()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="kalshi_example",
+        description="Driver script for reading kalshi orderbook data, logging from the orderbook websocket, and storing it to disc",
+    )
+
+    parser.add_argument("--log", help="log incoming messages")
+    parser.add_argument("file", help="<Path> to read messages from")
+    args = parser.parse_args()
+    if not Path(args.file).is_file():
+        raise FileNotFoundError(f"{args.file} does not exist.")
+    if args.log:
+        LOGGER.info("Logging mode enabled")
+
+    return args
+
 
 def log_message(msg: str, file: TextIOWrapper) -> None:
     stamped_msg = {"timestamp": time.time_ns(), "msg": msg}
@@ -69,11 +97,7 @@ async def display_loop(book: "OrderBook", ofi: "OFITracker", stats: dict) -> Non
         print(f"\r{line:<110}", end="", flush=True)
 
 
-async def handle_messages(websocket, file: Path):
-    """Subscribe and process messages for the life of one connection."""
-    # Subscribe to both the order book and the trade (execution) feed.
-    # orderbook_delta -> changes to resting limit orders (+ one snapshot on subscribe)
-    # trade          -> actual executed trades (this is the "trade activity" feed)
+async def subscribe_to_ws(websocket):
     subscribe_msg = {
         "id": 1,
         "cmd": "subscribe",
@@ -82,7 +106,15 @@ async def handle_messages(websocket, file: Path):
             "market_tickers": [MARKET_TICKER.upper()],
         },
     }
-    await websocket.send(json.dumps(subscribe_msg))
+    websocket.send(json.dumps(subscribe_msg))
+
+
+async def handle_messages(websocket, file: Path):
+    """Subscribe and process messages for the life of one connection."""
+    # Subscribe to both the order book and the trade (execution) feed.
+    # orderbook_delta -> changes to resting limit orders (+ one snapshot on subscribe)
+    # trade          -> actual executed trades (this is the "trade activity" feed)
+    await subscribe_to_ws(websocket)
 
     book = OrderBook(MARKET_TICKER.upper())
     ofi = OFITracker()
@@ -154,7 +186,14 @@ async def orderbook_websocket():
                 open_timeout=10,
             ) as websocket:
                 print(f"Connected! Subscribing to {MARKET_TICKER.upper()}")
-                log_file = MARKET_TICKER + "_" + datetime.now(tz=ZoneInfo("America/New_York")).strftime("%d%b%Y_%H") + ".txt"
+                log_file = (
+                    MARKET_TICKER
+                    + "_"
+                    + datetime.now(tz=ZoneInfo("America/New_York")).strftime(
+                        "%d%b%Y_%H"
+                    )
+                    + ".txt"
+                )
                 await handle_messages(websocket, log_file)
 
         except websockets.exceptions.ConnectionClosed as e:
