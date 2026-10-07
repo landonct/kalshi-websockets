@@ -1,4 +1,5 @@
 #! /bin/python
+import sys
 import _asyncio
 import argparse
 import asyncio
@@ -121,7 +122,7 @@ def classify_message(
         print(f"\nUnhandled message type {msg_type!r}: {data}")
 
 
-async def display_loop(book: "OrderBook", ofi: "OFITracker", stats: dict) -> None:
+async def display_loop(states: dict[str, MarketState]) -> None:
     """Repaint a single in-place status line at a fixed rate.
 
     Decoupled from the message rate: the book updates on every delta, but we
@@ -129,34 +130,32 @@ async def display_loop(book: "OrderBook", ofi: "OFITracker", stats: dict) -> Non
     Uses '\\r' + flush so each line overwrites the previous one (no scrolling).
     """
     period = 1.0 / REFRESH_HZ
-    last_delta_count = 0
+    last_deltas = {t: 0.0 for t in states}
+    first_frame = True
+
     while True:
         await asyncio.sleep(period)
-        if not book.ready:
-            continue
 
-        bid, ask = book.best_yes_bid(), book.best_yes_ask()
-        if ask is None or bid is None:
-            raise TypeError("ask or bid cannot be None")
-        else:
-            bid_ask_spread = int(100 * (ask[0] - bid[0]))
+        lines = []
+        for ticker, s in states.items():
+            rate = (s.stats["deltas"] - last_deltas[ticker]) * REFRESH_HZ
+            last_deltas[ticker] = s.stats["deltas"]
 
-        imb = book.book_imbalance()
-        if not (bid and ask and imb is not None):
-            continue
+            imb = s.book.book_imbalance() if s.book.ready else None
+            if imb is None:
+                lines.append(f"{ticker:<40} | waiting for two-sided book")
+            else:
+                lines.append(
+                    f"{ticker:<40} | imb {imb:+.3f} | OFI {s.ofi.ofi:+8.1f} | {rate:>4.0f} upd/s"
+                )
 
-        # Delta rate since the last repaint -> "activity" gauge.
-        rate = (stats["deltas"] - last_delta_count) * REFRESH_HZ
-        last_delta_count = stats["deltas"]
-
-        last_trade = stats.get("last_trade") or "-"
-        line = (
-            f"bid {bid[0]:.2f}x{bid[1]:>5.0f} | ask {ask[0]:.2f}x{ask[1]:>5.0f} "
-            f"| imb {imb:+.3f} | OFI {ofi.ofi:+8.1f} "
-            f"| {rate:>4.0f} upd/s | last trade {last_trade} | spread {bid_ask_spread:>2.0f}   "
-        )
-        # Pad to a fixed width so leftovers from a longer prior line are wiped.
-        print(f"\r{line:<110}", end="", flush=True)
+        # \033[K clears to end of line so a shorter line doesn't leave leftovers.
+        frame = "\n".join(line + "\033[K" for line in lines)
+        if not first_frame:
+            sys.stdout.write(f"\033[{len(lines)}A")  # cursor up over the last frame
+        sys.stdout.write(frame + "\n")
+        sys.stdout.flush()
+        first_frame = False
 
 
 async def subscribe_to_ws(websocket, tickers: list[str]):
@@ -178,12 +177,18 @@ async def handle_messages(websocket, tickers, file: list[Path], from_file: bool)
     # trade          -> actual executed trades (this is the "trade activity" feed)
     await subscribe_to_ws(websocket, tickers)
 
-    book = OrderBook(MARKET_TICKER.upper())
-    ofi = OFITracker()
-    stats = {"deltas": 0.0, "trades": 0.0, "last_trade": None}
+    states = {
+        t.upper(): MarketState(
+            ticker = t.upper(),
+            book = OrderBook(t.upper()),
+            ofi = OFITracker(),
+            stats = {"deltas": 0.0, "trades": 0.0, "last_trade": None}
+        )
+        for t in tickers
+    }
 
     # Run the display on its own timer, independent of the message stream.
-    painter = asyncio.create_task(display_loop(book, ofi, stats))
+    painter = asyncio.create_task(display_loop(states))
 
     context = open(file, "a") if from_file else contextlib.nullcontext()  # todo #8
 
