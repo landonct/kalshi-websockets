@@ -1,6 +1,8 @@
 #! /bin/python
+import _asyncio
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -8,12 +10,18 @@ import time
 from _io import TextIOWrapper
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import websockets
 from dotenv import load_dotenv
 
-from connection_utils import create_headers, load_private_key_from_file
+from connection_utils import (
+    create_headers,
+    get_live_markets,
+    get_series_list,
+    load_private_key_from_file,
+)
 from data_models import OFITracker, OrderBook
 
 load_dotenv(".env")
@@ -43,13 +51,27 @@ def parse_args() -> argparse.Namespace:
         description="Driver script for reading kalshi orderbook data, logging from the orderbook websocket, and storing it to disc",
     )
 
-    parser.add_argument("--log", help="log incoming messages")
-    parser.add_argument("file", help="<Path> to read messages from")
+    parser.add_argument("--log", action="store_true", help="Log incoming messages")
+    
+    # Optional flags automatically parse and store the value following the flag name
+    parser.add_argument("--file", type=str, help="<Path> to read messages from")
+    parser.add_argument("--category", type=str, help="Kalshi series category to subscribe to")
+    parser.add_argument("--market", type=str, help="Kalshi market ticker to subscribe to")
+    parser.add_argument("--volume", type=float, default=0.0, help="Minimum volume for a series")
+
     args = parser.parse_args()
-    if not Path(args.file).is_file():
+    if args.file is not None and not Path(args.file).is_file():
         raise FileNotFoundError(f"{args.file} does not exist.")
     if args.log:
         LOGGER.info("Logging mode enabled")
+    if args.file:
+        LOGGER.info(f"Reading from file {args.file}")
+    if args.category:
+        LOGGER.info(f"Subscribing to markets with category {args.category}")
+        if args.volume:
+            LOGGER.info(f"Only considering markets with volume > {args.volume}")
+    if args.market:
+        LOGGER.info(f"Subscribing to market {args.market}")
 
     return args
 
@@ -57,6 +79,46 @@ def parse_args() -> argparse.Namespace:
 def log_message(msg: str, file: TextIOWrapper) -> None:
     stamped_msg = {"timestamp": time.time_ns(), "msg": msg}
     file.write(f"{json.dumps(stamped_msg)}\n")
+
+
+def classify_message(
+    data: Any,
+    msg: str,
+    msg_type: str,
+    *,
+    book: OrderBook,
+    ofi: OFITracker,
+    stats: dict[str, float | None],
+) -> None:
+    if msg_type == "subscribed":
+        # \n first so we don't leave the status line half-drawn above.
+        print(f"Subscribed: {data}")
+
+    elif msg_type == "orderbook_snapshot":
+        book.apply_snapshot(msg)
+        print(f"Snapshot applied: {len(book.yes)} yes levels, {len(book.no)} no levels")
+
+    elif msg_type == "orderbook_delta":
+        if not book.ready:
+            return  # wait for the snapshot before applying deltas, should ne be the case as snapshot is sent first
+        book.apply_delta(msg)
+        ofi.update(book)
+        stats["deltas"] += 1
+
+    elif msg_type == "trade":
+        stats["trades"] += 1
+        # Trade msg fields (confirmed): yes_price_dollars / no_price_dollars,
+        # count_fp (size), taker_side ('yes'/'no'), taker_book_side.
+        price = msg.get("yes_price_dollars")
+        count = float(msg.get("count_fp", 0))
+        side = msg.get("taker_side", "")
+        stats["last_trade"] = f"{count:.0f}@{price} {side}"
+
+    elif msg_type == "error":
+        print(f"\nError: {data}")
+
+    else:
+        print(f"\nUnhandled message type {msg_type!r}: {data}")
 
 
 async def display_loop(book: "OrderBook", ofi: "OFITracker", stats: dict) -> None:
@@ -97,19 +159,19 @@ async def display_loop(book: "OrderBook", ofi: "OFITracker", stats: dict) -> Non
         print(f"\r{line:<110}", end="", flush=True)
 
 
-async def subscribe_to_ws(websocket):
+async def subscribe_to_ws(websocket, tickers: list[str]):
     subscribe_msg = {
         "id": 1,
         "cmd": "subscribe",
         "params": {
             "channels": ["orderbook_delta", "trade"],
-            "market_tickers": [MARKET_TICKER.upper()],
+            "market_tickers": [string.capatilize() for string in tickers],
         },
     }
-    websocket.send(json.dumps(subscribe_msg))
+    await websocket.send(json.dumps(subscribe_msg))
 
 
-async def handle_messages(websocket, file: Path):
+async def handle_messages(websocket, file: Path, from_file: bool):
     """Subscribe and process messages for the life of one connection."""
     # Subscribe to both the order book and the trade (execution) feed.
     # orderbook_delta -> changes to resting limit orders (+ one snapshot on subscribe)
@@ -123,52 +185,24 @@ async def handle_messages(websocket, file: Path):
     # Run the display on its own timer, independent of the message stream.
     painter = asyncio.create_task(display_loop(book, ofi, stats))
 
+    context = open(file, "a") if from_file else contextlib.nullcontext()  # todo #8
+
     try:
         # we want this to be a buffered write, ignore the linters sugestions
-        with open(file, "a") as f:  # noqa: ASYNC230
+        with context as f:
             async for message in websocket:
                 log_message(message, f)
                 data = json.loads(message)
                 msg_type = data.get("type")
                 msg = data.get("msg", {})
 
-                if msg_type == "subscribed":
-                    # \n first so we don't leave the status line half-drawn above.
-                    print(f"Subscribed: {data}")
-
-                elif msg_type == "orderbook_snapshot":
-                    book.apply_snapshot(msg)
-                    print(
-                        f"Snapshot applied: {len(book.yes)} yes levels, "
-                        f"{len(book.no)} no levels"
-                    )
-
-                elif msg_type == "orderbook_delta":
-                    if not book.ready:
-                        continue  # wait for the snapshot before applying deltas, should ne be the case as snapshot is sent first
-                    book.apply_delta(msg)
-                    ofi.update(book)
-                    stats["deltas"] += 1
-
-                elif msg_type == "trade":
-                    stats["trades"] += 1
-                    # Trade msg fields (confirmed): yes_price_dollars / no_price_dollars,
-                    # count_fp (size), taker_side ('yes'/'no'), taker_book_side.
-                    price = msg.get("yes_price_dollars")
-                    count = float(msg.get("count_fp", 0))
-                    side = msg.get("taker_side", "")
-                    stats["last_trade"] = f"{count:.0f}@{price} {side}"
-
-                elif msg_type == "error":
-                    print(f"\nError: {data}")
-
-                else:
-                    print(f"\nUnhandled message type {msg_type!r}: {data}")
+                # todo #7
+                classify_message(data, msg, msg_type, book=book, ofi=ofi, stats=stats)
     finally:
         painter.cancel()
 
 
-async def orderbook_websocket():
+async def orderbook_websocket(tickers: list[str], from_file: bool):
     """Connect to WebSocket and keep reconnecting if the server drops us."""
     while True:
         # Re-create headers each attempt: the signed timestamp must be fresh.
@@ -176,37 +210,45 @@ async def orderbook_websocket():
         ws_headers = create_headers(
             PRIVATE_KEY, "GET", "/trade-api/ws/v2", KALSHI_ACCESS_KEY
         )
-        try:
-            # ping_interval keeps the connection alive; open_timeout avoids hanging.
-            async with websockets.connect(
-                WS_URL,
-                additional_headers=ws_headers,
-                ping_interval=10,
-                ping_timeout=20,
-                open_timeout=10,
-            ) as websocket:
-                print(f"Connected! Subscribing to {MARKET_TICKER.upper()}")
-                log_file = (
-                    MARKET_TICKER
-                    + "_"
-                    + datetime.now(tz=ZoneInfo("America/New_York")).strftime(
-                        "%d%b%Y_%H"
-                    )
-                    + ".txt"
-                )
-                await handle_messages(websocket, log_file)
+        if from_file:
+            pass
+        else:
+            try:
+                # ping_interval keeps the connection alive; open_timeout avoids hanging.
+                async with websockets.connect(
+                    WS_URL,
+                    additional_headers=ws_headers,
+                    ping_interval=10,
+                    ping_timeout=20,
+                    open_timeout=10,
+                ) as websocket:
+                    print(f"Connected! Subscribing to {tickers}")
+                    log_files = [
+                        ticker
+                        + "_"
+                        + datetime.now(tz=ZoneInfo("America/New_York")).strftime(
+                            "%-d%b%Y_%H"
+                        )
+                        + ".txt"
+                        for ticker in tickers
+                    ]
+                    await handle_messages(websocket, log_files, from_file)
 
-        except websockets.exceptions.ConnectionClosed as e:
-            print(f"Connection closed ({e!r}); reconnecting in 3s...")
-        except OSError as e:
-            print(f"Network error ({e!r}); reconnecting in 3s...")
+            except websockets.exceptions.ConnectionClosed as e:
+                print(f"Connection closed ({e!r}); reconnecting in 3s...")
+            except OSError as e:
+                print(f"Network error ({e!r}); reconnecting in 3s...")
 
-        await asyncio.sleep(3)
+            await asyncio.sleep(3)
 
 
 # Run the example
 if __name__ == "__main__":
+    args = parse_args()
+    if bool(args.category):
+        series = get_series_list(args.category, bool(args.volume), args.volume)
+        series = series[series["tickers"].str.contains(r"(GAME)|(MATCH)")]
     try:
-        asyncio.run(orderbook_websocket())
+        asyncio.run(orderbook_websocket(series["ticker"], from_file=(args.file is not None)))
     except KeyboardInterrupt:
         print("\nStopped.")

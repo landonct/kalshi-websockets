@@ -33,7 +33,6 @@ cd "$(dirname "$0")" || die "cannot cd to script dir"
 info "starting to copy files to the external drive"
 
 info "zipping ${DATA_DIR} into ${ZIP_FILE}"
-die "i'm stopping!"
 zip -r "${ZIP_FILE}" "$DATA_DIR" || die "failed to zip ${DATA_DIR}"
 info "zip completed. copying ${ZIP_FILE} into ${DATA_DEST}"
 mkdir -p "$DATA_DEST" || die "failed to make directory ${DATA_DEST}"
