@@ -54,8 +54,8 @@ def create_headers(private_key, method: str, path: str, key: str) -> dict:
     }
 
 
-def get_live_markets(tickers: str, *, limit: int = 100, page_limit: int = 1000, max_retries: int = 5) -> list[str]:
-    params: dict = {"status": "open", "limit": page_limit, "series_ticker": tickers}
+def get_live_markets(series_ticker: str, *, limit: int = 100, page_limit: int = 1000, max_retries: int = 5) -> list[str]:
+    params: dict = {"status": "open", "limit": page_limit, "series_ticker": series_ticker}
     tickers: list[str] = []
     while True:
         backoff = 1

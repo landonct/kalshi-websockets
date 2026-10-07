@@ -82,3 +82,4 @@ __pycache__
 data
 *.zip
 
+*.toml

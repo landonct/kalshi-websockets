@@ -22,7 +22,7 @@ from connection_utils import (
     get_series_list,
     load_private_key_from_file,
 )
-from data_models import OFITracker, OrderBook
+from data_models import InvalidMarket, MarketState, OFITracker, OrderBook
 
 load_dotenv(".env")
 KALSHI_ACCESS_KEY = os.getenv("KALSHI_ACCESS_KEY")
@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     # Optional flags automatically parse and store the value following the flag name
     parser.add_argument("--file", type=str, help="<Path> to read messages from")
     parser.add_argument("--category", type=str, help="Kalshi series category to subscribe to")
-    parser.add_argument("--market", type=str, help="Kalshi market ticker to subscribe to")
+    parser.add_argument("--series", type=str, help="Kalshi series ticker to subscribe to")
     parser.add_argument("--volume", type=float, default=0.0, help="Minimum volume for a series")
 
     args = parser.parse_args()
@@ -70,8 +70,8 @@ def parse_args() -> argparse.Namespace:
         LOGGER.info(f"Subscribing to markets with category {args.category}")
         if args.volume:
             LOGGER.info(f"Only considering markets with volume > {args.volume}")
-    if args.market:
-        LOGGER.info(f"Subscribing to market {args.market}")
+    if args.series:
+        LOGGER.info(f"Subscribing to market {args.series}")
 
     return args
 
@@ -165,22 +165,22 @@ async def subscribe_to_ws(websocket, tickers: list[str]):
         "cmd": "subscribe",
         "params": {
             "channels": ["orderbook_delta", "trade"],
-            "market_tickers": [string.capatilize() for string in tickers],
+            "market_tickers": [string.upper() for string in tickers],
         },
     }
     await websocket.send(json.dumps(subscribe_msg))
 
 
-async def handle_messages(websocket, file: Path, from_file: bool):
+async def handle_messages(websocket, tickers, file: list[Path], from_file: bool):
     """Subscribe and process messages for the life of one connection."""
     # Subscribe to both the order book and the trade (execution) feed.
     # orderbook_delta -> changes to resting limit orders (+ one snapshot on subscribe)
     # trade          -> actual executed trades (this is the "trade activity" feed)
-    await subscribe_to_ws(websocket)
+    await subscribe_to_ws(websocket, tickers)
 
     book = OrderBook(MARKET_TICKER.upper())
     ofi = OFITracker()
-    stats = {"deltas": 0, "trades": 0, "last_trade": None}
+    stats = {"deltas": 0.0, "trades": 0.0, "last_trade": None}
 
     # Run the display on its own timer, independent of the message stream.
     painter = asyncio.create_task(display_loop(book, ofi, stats))
@@ -202,7 +202,7 @@ async def handle_messages(websocket, file: Path, from_file: bool):
         painter.cancel()
 
 
-async def orderbook_websocket(tickers: list[str], from_file: bool):
+async def orderbook_websocket(tickers: dict[str, list[str]], from_file: bool):
     """Connect to WebSocket and keep reconnecting if the server drops us."""
     while True:
         # Re-create headers each attempt: the signed timestamp must be fresh.
@@ -224,15 +224,15 @@ async def orderbook_websocket(tickers: list[str], from_file: bool):
                 ) as websocket:
                     print(f"Connected! Subscribing to {tickers}")
                     log_files = [
-                        ticker
+                        Path(ticker
                         + "_"
                         + datetime.now(tz=ZoneInfo("America/New_York")).strftime(
                             "%-d%b%Y_%H"
                         )
-                        + ".txt"
+                        + ".txt")
                         for ticker in tickers
                     ]
-                    await handle_messages(websocket, log_files, from_file)
+                    await handle_messages(websocket, tickers, log_files, from_file)
 
             except websockets.exceptions.ConnectionClosed as e:
                 print(f"Connection closed ({e!r}); reconnecting in 3s...")
@@ -247,8 +247,14 @@ if __name__ == "__main__":
     args = parse_args()
     if bool(args.category):
         series = get_series_list(args.category, bool(args.volume), args.volume)
-        series = series[series["tickers"].str.contains(r"(GAME)|(MATCH)")]
+        series = series[series["tickers"].str.contains(r"GAME|MATCH")]
+        markets = {series_ticker: get_live_markets(series_ticker) for series_ticker in series["tickers"]}
+    elif args.series is not None:
+        markets = {args.series: get_live_markets(args.series)} 
+    else:
+        print("usage: kalshi_example [-h] [--log] [--file FILE] [--category CATEGORY] [--series SERIES] [--volume VOLUME]")
+        raise InvalidMarket("MARKET cannot be None")
     try:
-        asyncio.run(orderbook_websocket(series["ticker"], from_file=(args.file is not None)))
+        asyncio.run(orderbook_websocket(markets, from_file=(args.file is not None)))
     except KeyboardInterrupt:
         print("\nStopped.")

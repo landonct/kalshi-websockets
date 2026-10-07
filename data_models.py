@@ -4,6 +4,11 @@ from dataclasses import dataclass
 class NonEmptyBook(Exception):
     pass
 
+class InvalidMarket(Exception):
+    pass
+
+
+
 class OrderBook:
     """Maintains a local Kalshi order book from snapshot + delta messages.
 
@@ -130,3 +135,10 @@ class Trade:
     size: float
     taker_outcome_side: str
     taker_book_side: str
+
+@dataclass
+class MarketState:
+    ticker: str
+    book: OrderBook
+    ofi: OFITracker
+    stats: dict[str, float | None]
