@@ -98,7 +98,7 @@ def get_series_list(category: str, include_volume: bool = False, min_volume: flo
     retries = 0
     params = {"category": category, "include_volume": include_volume}
     tickers: list[str] = []
-    volume: list[str] = []
+    volume: list[float] = []
 
     r = requests.get(SERIES_URL, params=params)
 
@@ -128,4 +128,4 @@ def get_series_list(category: str, include_volume: bool = False, min_volume: flo
     df = pd.DataFrame({"tickers": tickers, "volume": volume})
     df = df.sort_values("volume") if include_volume else df.sort_values("tickers")
 
-    return df[df["volume"] > min_volume].reset_index(drop=True) if include_volume else df["tickers"].reset_index(drop=True)
+    return df[df["volume"] > min_volume].reset_index(drop=True) if include_volume else df[["tickers"]].reset_index(drop=True)

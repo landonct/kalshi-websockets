@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 from data_models import NonEmptyBook, OrderBook
-from kalshi_example import MARKET_TICKER
 
 
 def check_file(paths: list[Path]):
@@ -75,7 +74,3 @@ def replay_json(path: Path, book: OrderBook) -> OrderBook:
                 print(f"\nUnhandled message type {msg_type!r}: {data}")
 
     return book
-
-
-book = OrderBook(MARKET_TICKER)
-book = replay_json(Path("test.txt"), book)
