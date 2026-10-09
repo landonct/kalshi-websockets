@@ -27,7 +27,8 @@ load_dotenv(".env")
 KALSHI_ACCESS_KEY = os.getenv("KALSHI_ACCESS_KEY")
 PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH")
 PRIVATE_KEY = load_private_key_from_file(PRIVATE_KEY_PATH)
-WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+KALSHI_WS_URL="ws://localhost:8765"
+WS_URL = os.getenv("KALSHI_WS_URL", "wss://external-api-ws.kalshi.com/trade-api/ws/v2")
 LOG_ROOT = Path("data")
 NY = ZoneInfo("America/New_York")
 method = "GET"
@@ -42,6 +43,10 @@ logging.basicConfig(
     filemode="a",  # 'w' overwrites the file; 'a' appends (default)
 )
 LOGGER = logging.getLogger()
+
+if WS_URL != "wss://external-api-ws.kalshi.com/trade-api/ws/v2":
+    LOGGER.warning("Using NON-DEFAULT websocket URL: %s", WS_URL)
+    print(f"WARNING: connecting to {WS_URL}, not Kalshi")
 
 
 def parse_args() -> argparse.Namespace:

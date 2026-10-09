@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+import numpy as np
+
 
 class NonEmptyBook(Exception):
     pass
@@ -65,7 +67,10 @@ class OrderBook:
         """(price, qty) of the highest Yes bid, or None."""
         if not self.yes:
             return None
-        p = max({k: v for k, v in self.yes.items() if v >= 1}, key=float)
+        yes_bids = {k: v for k, v in self.yes.items() if v >= 1}
+        if not yes_bids:
+            yes_bids = {"empty": -np.inf}
+        p = max(yes_bids, key=float)
         return float(p), self.yes[p]
 
     def best_yes_ask(self):
@@ -73,7 +78,10 @@ class OrderBook:
         if not self.no:
             return None
         # Best No bid = highest No price -> tightest Yes ask = 1 - that price.
-        p = max({k: v for k, v in self.no.items() if v >= 1}, key=float)
+        yes_ask = {k: v for k, v in self.no.items() if v >= 1}
+        if not yes_ask:
+            yes_ask = {"empty": -np.inf}
+        p = max(yes_ask, key=float)
         return round(1.0 - float(p), 4), self.no[p]
 
     def book_imbalance(self) -> float | None:
