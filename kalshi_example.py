@@ -27,9 +27,10 @@ load_dotenv(".env")
 KALSHI_ACCESS_KEY = os.getenv("KALSHI_ACCESS_KEY")
 PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH")
 PRIVATE_KEY = load_private_key_from_file(PRIVATE_KEY_PATH)
-KALSHI_WS_URL="ws://localhost:8765"
-WS_URL = os.getenv("KALSHI_WS_URL", "wss://external-api-ws.kalshi.com/trade-api/ws/v2")
-LOG_ROOT = Path("data")
+LOCAL_WS_URL = "ws://localhost:8765"
+DEFAULT_WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+WS_URL = os.getenv("KALSHI_WS_URL", DEFAULT_WS_URL)
+LOG_ROOT = Path(os.getenv("KALSHI_DATA_DIR", "data_test" if WS_URL != DEFAULT_WS_URL else "data"))
 NY = ZoneInfo("America/New_York")
 method = "GET"
 
@@ -230,7 +231,12 @@ async def handle_messages(websocket, tickers, queue: asyncio.Queue):
             
             state = states.get(msg.get("market_ticker"))
             if state is None:
-                LOGGER.info("control message: %s", data)
+                LOGGER.info(
+                "unrouted: type=%s inner_ticker=%r top_ticker=%r in_states=%s",
+                msg_type, msg.get("market_ticker"), data.get("market_ticker"),
+                msg.get("market_ticker") in states,
+                )
+                # LOGGER.info("control message: %s", data)
                 continue
             # todo #7
             classify_message(data, msg, msg_type, book=state.book, ofi=state.ofi, stats=state.stats)
