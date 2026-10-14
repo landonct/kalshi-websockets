@@ -63,6 +63,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--category", type=str, help="Kalshi series category to subscribe to")
     parser.add_argument("--series", type=str, help="Kalshi series ticker to subscribe to")
     parser.add_argument("--volume", type=float, default=0.0, help="Minimum volume for a series (only used with --category)")
+    parser.add_argument("--tickers", nargs="+", type=list, default = [], help="List of kalshi tickers to subscribe to")
+    # todo #9
 
     args = parser.parse_args()
     if args.file is not None and not Path(args.file).is_file():
@@ -77,6 +79,8 @@ def parse_args() -> argparse.Namespace:
             LOGGER.info(f"Only considering markets with volume > {args.volume}")
     if args.series:
         LOGGER.info(f"Subscribing to market {args.series}")
+    if args.tickers:
+        LOGGER.info(f"Subscribing to tickers {", ".join(args.tickers)}")
 
     return args
 
