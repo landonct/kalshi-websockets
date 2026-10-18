@@ -1,9 +1,11 @@
 #! /bin/python
+from collections import Counter
 import argparse
 import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -30,8 +32,11 @@ PRIVATE_KEY = load_private_key_from_file(PRIVATE_KEY_PATH)
 LOCAL_WS_URL = "ws://localhost:8765"
 DEFAULT_WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 WS_URL = os.getenv("KALSHI_WS_URL", DEFAULT_WS_URL)
-LOG_ROOT = Path(os.getenv("KALSHI_DATA_DIR", "data_test" if WS_URL != DEFAULT_WS_URL else "data"))
+LOG_ROOT = Path(
+    os.getenv("KALSHI_DATA_DIR", "data_test" if WS_URL != DEFAULT_WS_URL else "data")
+)
 NY = ZoneInfo("America/New_York")
+PAINTER_RUNNING = False
 method = "GET"
 
 REFRESH_HZ = 10  # how many times per second to repaint the status line
@@ -56,14 +61,30 @@ def parse_args() -> argparse.Namespace:
         description="Driver script for reading kalshi orderbook data, logging from the orderbook websocket, and storing it to disc",
     )
 
-    parser.add_argument("--log", action="store_true", help="Log incoming messages") # todo #10
-    
+    parser.add_argument(
+        "--log", action="store_true", help="Log incoming messages"
+    )  # todo #10
+
     # Optional flags automatically parse and store the value following the flag name
     parser.add_argument("--file", type=str, help="<Path> to read messages from")
-    parser.add_argument("--category", type=str, help="Kalshi series category to subscribe to")
-    parser.add_argument("--series", type=str, help="Kalshi series ticker to subscribe to")
-    parser.add_argument("--volume", type=float, default=0.0, help="Minimum volume for a series (only used with --category)")
-    parser.add_argument("--tickers", nargs="+", type=list, default = [], help="List of kalshi tickers to subscribe to")
+    parser.add_argument(
+        "--category", type=str, help="Kalshi series category to subscribe to"
+    )
+    parser.add_argument(
+        "--series", type=str, help="Kalshi series ticker to subscribe to"
+    )
+    parser.add_argument(
+        "--volume",
+        type=float,
+        default=0.0,
+        help="Minimum volume for a series (only used with --category)",
+    )
+    parser.add_argument(
+        "--tickers",
+        nargs="+",
+        default=[],
+        help="List of kalshi tickers to subscribe to",
+    )
     # todo #9
 
     args = parser.parse_args()
@@ -84,9 +105,11 @@ def parse_args() -> argparse.Namespace:
 
     return args
 
+
 def log_path(ts_ns: int) -> Path:
     t = datetime.fromtimestamp(ts_ns / 1e9, tz=NY)
     return LOG_ROOT / t.strftime("%Y%m%d") / f"orderbook_{t.strftime("%H")}.txt"
+
 
 async def writer_task(queue: asyncio.Queue) -> None:
     f, current = None, None
@@ -100,12 +123,13 @@ async def writer_task(queue: asyncio.Queue) -> None:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 f, current = open(path, "a"), path
             assert f is not None
-            f.write(json.dumps({"timestamp": ts, "msg": raw}) + '\n')
+            f.write(json.dumps({"timestamp": ts, "msg": raw}) + "\n")
             if queue.empty():
                 f.flush()
     finally:
         if f:
             f.close()
+
 
 def log_message(msg: str, file: TextIO) -> None:
     stamped_msg = {"timestamp": time.time_ns(), "msg": msg}
@@ -127,7 +151,9 @@ def classify_message(
 
     elif msg_type == "orderbook_snapshot":
         book.apply_snapshot(msg)
-        LOGGER.info(f"Snapshot applied: {len(book.yes)} yes levels, {len(book.no)} no levels")
+        LOGGER.info(
+            f"Snapshot applied: {len(book.yes)} yes levels, {len(book.no)} no levels"
+        )
 
     elif msg_type == "orderbook_delta":
         if not book.ready:
@@ -135,7 +161,7 @@ def classify_message(
         book.apply_delta(msg)
         ofi.update(book)
         if stats["deltas"] is not None:
-            stats["deltas"] += 1 
+            stats["deltas"] += 1
         else:
             stats["deltas"] = 1
 
@@ -149,7 +175,7 @@ def classify_message(
         price = float(msg.get("yes_price_dollars", -1.0))
         # count = float(msg.get("count_fp", 0))
         # side = msg.get("taker_side", "")
-        stats["last_trade"] = price # f"{count:.0f}@{price} {side}"
+        stats["last_trade"] = price  # f"{count:.0f}@{price} {side}"
 
     elif msg_type == "error":
         LOGGER.warning(f"\nError: {data}")
@@ -158,7 +184,7 @@ def classify_message(
         LOGGER.warning(f"\nUnhandled message type {msg_type!r}: {data}")
 
 
-async def display_loop(states: dict[str, MarketState]) -> None:
+async def display_loop(states: dict[str, MarketState], status: dict[str, str]) -> None:
     """Repaint a single in-place status line at a fixed rate.
 
     Decoupled from the message rate: the book updates on every delta, but we
@@ -171,11 +197,12 @@ async def display_loop(states: dict[str, MarketState]) -> None:
 
     while True:
         await asyncio.sleep(period)
-
-        lines = []
+        lines = [f"[{status['text']}]"]  # constant-height header line
         for ticker, s in states.items():
-            delta = s.stats["deltas"] if s.stats["deltas"] is not None else 0.0
-            rate = (delta - last_deltas[ticker]) * REFRESH_HZ
+            delta = s.stats["deltas"]
+            rate = (
+                max(0.0, delta - last_deltas[ticker]) * REFRESH_HZ
+            )  # counters restart at 0 on reconnect
             last_deltas[ticker] = delta
 
             imb = s.book.book_imbalance() if s.book.ready else None
@@ -207,60 +234,74 @@ async def subscribe_to_ws(websocket, tickers: list[str]):
     await websocket.send(json.dumps(subscribe_msg))
 
 
-async def handle_messages(websocket, tickers, queue: asyncio.Queue):
-    """Subscribe and process messages for the life of one connection."""
-    # Subscribe to both the order book and the trade (execution) feed.
-    # orderbook_delta -> changes to resting limit orders (+ one snapshot on subscribe)
-    # trade          -> actual executed trades (this is the "trade activity" feed)
+def new_state(t: str) -> MarketState:
+    return MarketState(
+        ticker=t,
+        book=OrderBook(t),
+        ofi=OFITracker(),
+        stats={"deltas": 0.0, "trades": 0.0, "last_trade": None},
+    )
+
+
+async def handle_messages(
+    websocket,
+    tickers: list[str],
+    states: dict[str, MarketState],
+    queue: asyncio.Queue,
+) -> None:
+    """Subscribe, then route frames to per-market state until the connection ends."""
     await subscribe_to_ws(websocket, tickers)
+    unrouted: Counter = Counter()
 
-    states = {
-        t.upper(): MarketState(
-            ticker = t.upper(),
-            book = OrderBook(t.upper()),
-            ofi = OFITracker(),
-            stats = {"deltas": 0.0, "trades": 0.0, "last_trade": None}
-        )
-        for t in tickers
-    }
+    async for message in websocket:
+        queue.put_nowait((time.time_ns(), message))  # log first, whatever happens next
 
-    # Run the display on its own timer, independent of the message stream.
-    painter = asyncio.create_task(display_loop(states))
-    try:
-        async for message in websocket:
-            queue.put_nowait((time.time_ns(), message))
+        try:
             data = json.loads(message)
             msg_type = data.get("type")
             msg = data.get("msg", {})
-            
-            state = states.get(msg.get("market_ticker"))
-            if state is None:
+
+            if msg_type == "subscribed":
                 LOGGER.info(
-                "unrouted: type=%s inner_ticker=%r top_ticker=%r in_states=%s",
-                msg_type, msg.get("market_ticker"), data.get("market_ticker"),
-                msg.get("market_ticker") in states,
+                    "Subscribed: channel=%s sid=%s", msg.get("channel"), msg.get("sid")
                 )
-                # LOGGER.info("control message: %s", data)
                 continue
-            # todo #7
-            classify_message(data, msg, msg_type, book=state.book, ofi=state.ofi, stats=state.stats)
-    finally:
-        painter.cancel()
+
+            if msg_type == "error":
+                LOGGER.warning("Server error: %s", data)
+                continue
+
+            ticker = msg.get("market_ticker")
+            state = states.get(ticker)
+            if state is None:
+                unrouted[ticker] += 1
+                if unrouted[ticker] == 1:  # warn once per unexpected ticker
+                    LOGGER.warning(
+                        "Frame for unsubscribed ticker %r (type=%s)", ticker, msg_type
+                    )
+                continue
+
+            classify_message(
+                data, msg, msg_type, book=state.book, ofi=state.ofi, stats=state.stats
+            )
+
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError):
+            LOGGER.exception("Bad frame, skipping: %.200r", message)
 
 
-async def orderbook_websocket(tickers:list[str]):
-    """Connect to WebSocket and keep reconnecting if the server drops us."""
+async def orderbook_websocket(tickers: list[str]):
+    tickers = [t.upper() for t in tickers]
+    states = {t: new_state(t) for t in tickers}  # lives for the whole process
+    status = {"text": "connecting"}  # shown on a header line
     queue: asyncio.Queue = asyncio.Queue()
-    writer = asyncio.create_task(writer_task(queue))
+    writer = asyncio.create_task(writer_task(queue), name="writer")
+    painter = asyncio.create_task(display_loop(states, status), name="painter")
     try:
         while True:
-            # Re-create headers each attempt: the signed timestamp must be fresh.
-            assert KALSHI_ACCESS_KEY is not None
             ws_headers = create_headers(
                 PRIVATE_KEY, "GET", "/trade-api/ws/v2", KALSHI_ACCESS_KEY
             )
             try:
-                # ping_interval keeps the connection alive; open_timeout avoids hanging.
                 async with websockets.connect(
                     WS_URL,
                     additional_headers=ws_headers,
@@ -268,17 +309,22 @@ async def orderbook_websocket(tickers:list[str]):
                     ping_timeout=20,
                     open_timeout=10,
                 ) as websocket:
-                    LOGGER.info(f"Connected! Subscribing to {len(tickers)} markets")
-                    await handle_messages(websocket, tickers, queue)
-
+                    for t in tickers:  # fresh books, SAME dict object
+                        states[t] = new_state(t)
+                    status["text"] = "connected"
+                    await handle_messages(websocket, tickers, states, queue)
+                status["text"] = "disconnected, retrying in 3s"
             except websockets.exceptions.ConnectionClosed as e:
+                status["text"] = "connection closed, retrying in 3s"
                 LOGGER.warning(f"Connection closed ({e!r}); reconnecting in 3s...")
             except OSError as e:
+                status["text"] = "network error, retrying in 3s"
                 LOGGER.warning(f"Network error ({e!r}); reconnecting in 3s...")
-
             await asyncio.sleep(3)
     finally:
+        painter.cancel()
         writer.cancel()
+
 
 def main():
     args = parse_args()
@@ -289,13 +335,24 @@ def main():
     if bool(args.category):
         series = get_series_list(args.category, bool(args.volume), args.volume)
         series = series[series["tickers"].str.contains(r"GAME|MATCH")]
-        markets = {series_ticker: get_live_markets(series_ticker) for series_ticker in series["tickers"]}
+        markets = {
+            series_ticker: get_live_markets(series_ticker)
+            for series_ticker in series["tickers"]
+        }
     elif args.series is not None:
-        markets = {args.series: get_live_markets(args.series)} 
+        markets = {args.series: get_live_markets(args.series)}
+    elif args.tickers:
+        markets = {
+            match.group(1): [t for t in args.tickers if t.startswith(match.group(1))]
+            for s in args.tickers
+            if (match := re.search(r"^(\w+)(?=-)", s))
+        }
     else:
-        print("usage: kalshi_example [-h] [--log] [--file FILE] [--category CATEGORY] [--series SERIES] [--volume VOLUME]")
+        print(
+            "usage: kalshi_example [-h] [--log] [--file FILE] [--category CATEGORY] [--series SERIES] [--volume VOLUME]"
+        )
         raise InvalidMarket("MARKET cannot be None")
-    
+
     all_tickers = [ticker for tickers in markets.values() for ticker in tickers]
     print(f"Subscribing to {len(all_tickers)} markets across {len(markets)} series")
     try:
@@ -303,7 +360,8 @@ def main():
     except KeyboardInterrupt:
         print("\nStopped.")
 
-# Run the example 
+
+# Run the example
 if __name__ == "__main__":
     # book = OrderBook("something")
     # book = replay_json(Path("test.txt"), book)
