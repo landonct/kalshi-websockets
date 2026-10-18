@@ -42,7 +42,7 @@ class OrderBook:
 
         for level in levels:
             price, qty = level[0], float(level[1])
-            book[str(price)] = qty
+            book[price] = qty
 
     def apply_snapshot(self, msg: dict) -> None:
         # snapshot keys *_dollars_fp
@@ -55,7 +55,7 @@ class OrderBook:
         price = str(msg.get("price_dollars", msg.get("price")))
         delta = float(msg.get("delta_fp", msg.get("delta", 0)))
         book = self.yes if side == "yes" else self.no
-        new_qty = book.get(price, 0.0) + delta
+        new_qty = round(book.get(price, 0.0) + delta, 2)
         if new_qty <= 0:
             book.pop(price, None)
         else:
@@ -67,21 +67,14 @@ class OrderBook:
         """(price, qty) of the highest Yes bid, or None."""
         if not self.yes:
             return None
-        yes_bids = {k: v for k, v in self.yes.items() if v >= 1}
-        if not yes_bids:
-            yes_bids = {"empty": -np.inf}
-        p = max(yes_bids, key=float)
+        p = max(self.yes, key=float)
         return float(p), self.yes[p]
 
     def best_yes_ask(self):
         """(price, qty) of the lowest Yes ask, derived from the No book."""
         if not self.no:
             return None
-        # Best No bid = highest No price -> tightest Yes ask = 1 - that price.
-        yes_ask = {k: v for k, v in self.no.items() if v >= 1}
-        if not yes_ask:
-            yes_ask = {"empty": -np.inf}
-        p = max(yes_ask, key=float)
+        p = max(self.no, key=float)
         return round(1.0 - float(p), 4), self.no[p]
 
     def book_imbalance(self) -> float | None:

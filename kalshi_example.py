@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
         description="Driver script for reading kalshi orderbook data, logging from the orderbook websocket, and storing it to disc",
     )
 
-    parser.add_argument("--log", action="store_true", help="Log incoming messages")
+    parser.add_argument("--log", action="store_true", help="Log incoming messages") # todo #10
     
     # Optional flags automatically parse and store the value following the flag name
     parser.add_argument("--file", type=str, help="<Path> to read messages from")
@@ -303,7 +303,7 @@ def main():
     except KeyboardInterrupt:
         print("\nStopped.")
 
-# Run the example
+# Run the example 
 if __name__ == "__main__":
     # book = OrderBook("something")
     # book = replay_json(Path("test.txt"), book)
