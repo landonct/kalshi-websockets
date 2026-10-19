@@ -57,10 +57,7 @@ def replay_json(path: Path, book: OrderBook) -> OrderBook:
 
             elif msg_type == "orderbook_snapshot":
                 book.apply_snapshot(inner_msg)
-                print(
-                    f"Snapshot applied: {len(book.yes)} yes levels, "
-                    f"{len(book.no)} no levels"
-                )
+                print(f"Snapshot applied: {len(book.yes)} yes levels, {len(book.no)} no levels")
 
             elif msg_type == "orderbook_delta":
                 if not book.ready:

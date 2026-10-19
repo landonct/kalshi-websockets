@@ -43,13 +43,7 @@ method = "GET"
 def sign_pss_text(private_key: rsa.RSAPrivateKey, text: str) -> str:
     message = text.encode("utf-8")
     try:
-        signature = private_key.sign(
-            message,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH
-            ),
-            hashes.SHA256(),
-        )
+        signature = private_key.sign(message, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH), hashes.SHA256())
         return base64.b64encode(signature).decode("utf-8")
     except InvalidSignature as e:
         raise ValueError("RSA sign PSS failed") from e
@@ -61,12 +55,7 @@ def create_headers(private_key, method: str, path: str) -> dict:
     msg_string = timestamp + method + path.split("?")[0]
     signature = sign_pss_text(private_key, msg_string)
 
-    return {
-        "Content-Type": "application/json",
-        "KALSHI-ACCESS-KEY": KALSHI_ACCESS_KEY,
-        "KALSHI-ACCESS-SIGNATURE": signature,
-        "KALSHI-ACCESS-TIMESTAMP": timestamp,
-    }
+    return {"Content-Type": "application/json", "KALSHI-ACCESS-KEY": KALSHI_ACCESS_KEY, "KALSHI-ACCESS-SIGNATURE": signature, "KALSHI-ACCESS-TIMESTAMP": timestamp}
 
 
 AUTH_HEADERS = create_headers(PRIVATE_KEY, method, "/trade-api/ws/v2")
@@ -93,21 +82,12 @@ class Trade:
         return f"{self.price} cent {side_str}, {self.volume} contracts"
 
     def __repr__(self) -> str:
-        return (
-            f"price: {self.price}, volume: {self.volume}, taker_side: {self.taker_side}"
-        )
+        return f"price: {self.price}, volume: {self.volume}, taker_side: {self.taker_side}"
 
 
 @dataclass
 class Row:
-    def __init__(
-        self,
-        market_ticker: str,
-        yes_price: float,
-        volume: int,
-        taker_side: Side,
-        created_time: datetime,
-    ) -> None:
+    def __init__(self, market_ticker: str, yes_price: float, volume: int, taker_side: Side, created_time: datetime) -> None:
         self.market_ticker = market_ticker
         self.yes_price = yes_price
         self.volume = volume
@@ -124,9 +104,7 @@ class TradeQueue:
         self._trade_queue: deque[Trade] = deque(maxlen=max_size)
         self._total_price: float = 0.0
         self._count: int = 0
-        self._average: float = (
-            self._total_price / self._count if self._count != 0 else 0
-        )
+        self._average: float = self._total_price / self._count if self._count != 0 else 0
         self._max_size = max_size
 
     def push(self, trade: Trade) -> None:
@@ -153,11 +131,7 @@ async def subscribe_to_ticker(websocket) -> None:
 
 
 async def subscribe_to_orderbook(websocket, market_tickers) -> None:
-    subscription = {
-        "id": 2,
-        "cmd": "subscribe",
-        "params": {"channels": ["orderbook_delta"], "market_tickers": market_tickers},
-    }
+    subscription = {"id": 2, "cmd": "subscribe", "params": {"channels": ["orderbook_delta"], "market_tickers": market_tickers}}
     await websocket.send(json.dumps(subscription))
 
 

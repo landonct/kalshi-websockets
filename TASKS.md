@@ -45,22 +45,26 @@ FIXTURE = "tests/fixtures/sample.jsonl"
 MODE = sys.argv[1] if len(sys.argv) > 1 else "normal"
 # modes: normal | drop | garbage | error | silent | seqgap | badfield
 
+
 async def handler(ws):
-    await ws.recv()                                    # the subscribe command
+    await ws.recv()  # the subscribe command
     frames = [json.loads(l)["msg"] for l in open(FIXTURE)]
     for i, frame in enumerate(frames):
         if MODE == "drop" and i == 500:
-            await ws.close(code=1011); return          # server-side failure
+            await ws.close(code=1011)
+            return  # server-side failure
         if MODE == "garbage" and i % 100 == 50:
             await ws.send("{not json")
         if MODE == "silent" and i == 500:
-            await asyncio.sleep(3600)                  # connected but no data
+            await asyncio.sleep(3600)  # connected but no data
         await ws.send(frame)
         await asyncio.sleep(0.001)
+
 
 async def main():
     async with serve(handler, "localhost", 8765):
         await asyncio.Future()
+
 
 asyncio.run(main())
 ```
@@ -160,18 +164,27 @@ def test_float_drift_removes_level():
 
 ```python
 class FakeBook:
-    def __init__(self, bid, ask): self._b, self._a = bid, ask
-    def best_yes_bid(self): return self._b
-    def best_yes_ask(self): return self._a
+    def __init__(self, bid, ask):
+        self._b, self._a = bid, ask
 
-@pytest.mark.parametrize("bid, ask, expected", [
-    ((0.51, 5),  (0.52, 8),  +5),   # bid price up   -> +new bid qty
-    ((0.50, 7),  (0.52, 8),  -3),   # bid same px    -> change in bid qty
-    ((0.49, 12), (0.52, 8), -10),   # bid price down -> -old bid qty
-    ((0.50, 10), (0.51, 4),  -4),   # ask price down -> -new ask qty
-    ((0.50, 10), (0.52, 5),  +3),   # ask same px    -> -(change in ask qty)
-    ((0.50, 10), (0.53, 6),  +8),   # ask price up   -> +old ask qty
-])
+    def best_yes_bid(self):
+        return self._b
+
+    def best_yes_ask(self):
+        return self._a
+
+
+@pytest.mark.parametrize(
+    "bid, ask, expected",
+    [
+        ((0.51, 5), (0.52, 8), +5),  # bid price up   -> +new bid qty
+        ((0.50, 7), (0.52, 8), -3),  # bid same px    -> change in bid qty
+        ((0.49, 12), (0.52, 8), -10),  # bid price down -> -old bid qty
+        ((0.50, 10), (0.51, 4), -4),  # ask price down -> -new ask qty
+        ((0.50, 10), (0.52, 5), +3),  # ask same px    -> -(change in ask qty)
+        ((0.50, 10), (0.53, 6), +8),  # ask price up   -> +old ask qty
+    ],
+)
 def test_ofi_branches(bid, ask, expected):
     t = OFITracker()
     t.update(FakeBook((0.50, 10), (0.52, 8)))

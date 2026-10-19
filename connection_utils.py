@@ -28,13 +28,7 @@ def load_private_key_from_file(file_path):
 def sign_pss_text(private_key: rsa.RSAPrivateKey, text: str) -> str:
     message = text.encode("utf-8")
     try:
-        signature = private_key.sign(
-            message,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH
-            ),
-            hashes.SHA256(),
-        )
+        signature = private_key.sign(message, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH), hashes.SHA256())
         return base64.b64encode(signature).decode("utf-8")
     except InvalidSignature as e:
         raise ValueError("RSA sign PSS failed") from e
@@ -46,12 +40,7 @@ def create_headers(private_key, method: str, path: str, key: str) -> dict:
     msg_string = timestamp + method + path.split("?")[0]
     signature = sign_pss_text(private_key, msg_string)
 
-    return {
-        "Content-Type": "application/json",
-        "KALSHI-ACCESS-KEY": key,
-        "KALSHI-ACCESS-SIGNATURE": signature,
-        "KALSHI-ACCESS-TIMESTAMP": timestamp,
-    }
+    return {"Content-Type": "application/json", "KALSHI-ACCESS-KEY": key, "KALSHI-ACCESS-SIGNATURE": signature, "KALSHI-ACCESS-TIMESTAMP": timestamp}
 
 
 def get_live_markets(series_ticker: str, *, limit: int = 100, page_limit: int = 1000, max_retries: int = 5) -> list[str]:
@@ -61,7 +50,7 @@ def get_live_markets(series_ticker: str, *, limit: int = 100, page_limit: int = 
         backoff = 1
         retries = 0
         r = requests.get(URL, params=params, timeout=10)
-        
+
         while r.status_code == 429 and retries < max_retries:
             retry_after = r.headers.get("Retry-After")
             if retry_after:
@@ -71,7 +60,7 @@ def get_live_markets(series_ticker: str, *, limit: int = 100, page_limit: int = 
                     delay = backoff
             else:
                 delay = backoff
-            
+
             print(f"Rate limited. Retrying ({retries + 1}/{max_retries}) after {delay} seconds...")
             time.sleep(delay)
             retries += 1
@@ -79,7 +68,6 @@ def get_live_markets(series_ticker: str, *, limit: int = 100, page_limit: int = 
             r = requests.get(URL, params=params, timeout=10)
 
         r.raise_for_status()
-
 
         data = r.json()
         new_tickers = [m["ticker"] for m in data.get("markets", [])]
@@ -92,6 +80,7 @@ def get_live_markets(series_ticker: str, *, limit: int = 100, page_limit: int = 
         if not cursor:
             return tickers
         params["cursor"] = cursor
+
 
 def get_series_list(category: str, include_volume: bool = False, min_volume: float = 0, max_retries: int = 5) -> pd.DataFrame:
     backoff = 1
@@ -111,7 +100,7 @@ def get_series_list(category: str, include_volume: bool = False, min_volume: flo
                 delay = backoff
         else:
             delay = backoff
-        
+
         print(f"Rate limited. Retrying ({retries + 1}/{max_retries}) after {delay} seconds...")
         time.sleep(delay)
         retries += 1

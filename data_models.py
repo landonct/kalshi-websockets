@@ -6,9 +6,9 @@ import numpy as np
 class NonEmptyBook(Exception):
     pass
 
+
 class InvalidMarket(Exception):
     pass
-
 
 
 class OrderBook:
@@ -136,6 +136,7 @@ class Trade:
     size: float
     taker_outcome_side: str
     taker_book_side: str
+
 
 @dataclass
 class MarketState:
