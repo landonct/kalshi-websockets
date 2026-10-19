@@ -195,7 +195,13 @@ def new_state(t: str) -> MarketState:
     return MarketState(ticker=t, book=OrderBook(t), ofi=OFITracker(), stats={"deltas": 0.0, "trades": 0.0, "last_trade": None})
 
 
-async def handle_messages(websocket, tickers: list[str], states: dict[str, MarketState], queue: asyncio.Queue) -> None:
+async def error_data_loop(errors: Counter, queue: asyncio.Queue):
+    while True:
+        await asyncio.sleep(60)
+        LOGGER.info("errors=%s queue_size=%d", dict(errors), queue.qsize())
+
+
+async def handle_messages(websocket, tickers: list[str], states: dict[str, MarketState], queue: asyncio.Queue, errors: Counter) -> None:
     """Subscribe, then route frames to per-market state until the connection ends."""
     await subscribe_to_ws(websocket, tickers)
     unrouted: Counter = Counter()
@@ -226,8 +232,10 @@ async def handle_messages(websocket, tickers: list[str], states: dict[str, Marke
 
             classify_message(data, msg, msg_type, book=state.book, ofi=state.ofi, stats=state.stats)
 
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError):
-            LOGGER.exception("Bad frame, skipping: %.200r", message)
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError) as e:
+            errors[type(e).__name__] += 1
+            if errors[type(e).__name__] <= 5:
+                LOGGER.exception("Bad frame, skipping: %.200r", message)
 
 
 async def orderbook_websocket(tickers: list[str]):
@@ -235,8 +243,10 @@ async def orderbook_websocket(tickers: list[str]):
     states = {t: new_state(t) for t in tickers}  # lives for the whole process
     status = {"text": "connecting"}  # shown on a header line
     queue: asyncio.Queue = asyncio.Queue()
+    errors: Counter = Counter()
     writer = asyncio.create_task(writer_task(queue), name="writer")
     painter = asyncio.create_task(display_loop(states, status), name="painter")
+    error_reporter = asyncio.create_task(error_data_loop(errors, queue))
     try:
         while True:
             if not KALSHI_ACCESS_KEY:
@@ -247,18 +257,26 @@ async def orderbook_websocket(tickers: list[str]):
                     for t in tickers:  # fresh books, SAME dict object
                         states[t] = new_state(t)
                     status["text"] = "connected"
-                    await handle_messages(websocket, tickers, states, queue)
-                status["text"] = "disconnected, retrying in 3s"
+                    await handle_messages(websocket, tickers, states, queue, errors)
+                reason = "server closed the connection"
+                await asyncio.sleep(3)
             except websockets.exceptions.ConnectionClosed as e:
-                status["text"] = "connection closed, retrying in 3s"
-                LOGGER.warning(f"Connection closed ({e!r}); reconnecting in 3s...")
+                reason = f"Connection closed ({e!r})"
+                errors["ConnectionClosed"] += 1
             except OSError as e:
-                status["text"] = "network error, retrying in 3s"
-                LOGGER.warning(f"Network error ({e!r}); reconnecting in 3s...")
+                reason = f"Network error ({e!r})"
+                errors[type(e).__name__] += 1
+            except Exception:
+                LOGGER.exception("Unexpected error in connection loop")
+                reason = "unexpected error"
+                errors["unexpected"] += 1
+
+            status["text"] = f"{reason}, retrying in 3s"
+            LOGGER.warning("%s, reconnection in 3 seconds", reason)
             await asyncio.sleep(3)
     finally:
-        painter.cancel()
-        writer.cancel()
+        for thing in (painter, writer, error_reporter):
+            thing.cancel()
 
 
 def main():
