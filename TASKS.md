@@ -80,7 +80,7 @@ asyncio.run(main())
 
 ## Phase 1: Crash safety
 
-- [ ] **1.1 Per-message exception handling in the receive loop** `P0`
+- [x] **1.1 Per-message exception handling in the receive loop** `P0`
   - Wrap parse + classify in `try/except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError)`. Log the raw frame, increment an `errors` counter, `continue`.
   - Today only `ConnectionClosed` and `OSError` are caught anywhere, so one malformed frame ends the process.
   - Verify: run the fake server in `garbage` mode. The process keeps running, the `errors` counter equals the number of frames injected, and each bad frame appears in the app log. Also run `badfield` mode (a delta with no `side`) and confirm the same.
