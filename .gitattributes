@@ -1,1 +1,12 @@
 * text=auto
+
+# 2. Force specific file types to ALWAYS use LF (even on Windows)
+*.js text eol=lf
+*.py text eol=lf
+
+# 3. Force specific file types to ALWAYS use CRLF (even on Mac/Linux)
+*.bat text eol=crlf
+
+# 4. Ensure binary files (like images) are not touched by Git
+*.png binary
+*.jpg binary

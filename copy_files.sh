@@ -15,7 +15,8 @@ info() { log INFO "$@"; }
 warn() { log WARNING "$@" >&2; }
 die() { 
     log ERROR "$@" >&2
-    local msg="ERROR in $(basename -- "$0"): $*"
+    local msg
+    msg="ERROR in $(basename -- "$0"): $*"
     echo "$msg" | mail -s "ERROR at $(date) in $(basename -- "$0")" "landon.thomas1@icloud.com"
     exit 1
 }

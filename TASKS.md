@@ -31,7 +31,7 @@ step anyway, then check the box.
   - `WS_URL = os.getenv("KALSHI_WS_URL", "wss://external-api-ws.kalshi.com/trade-api/ws/v2")`.
   - Verify: setting `KALSHI_WS_URL=ws://localhost:8765` makes the script try to connect locally.
 
-- [ ] **0.4 Build a fake server that replays your fixture and injects faults** `P0`
+- [x] **0.4 Build a fake server that replays your fixture and injects faults** `P0`
   - This is how you test reconnects, garbage frames, and shutdown without waiting for the real network to misbehave.
   - Frames are replayed verbatim from the `msg` field, so the shapes are the real ones. Run it with `python tests/fake_server.py drop`.
   - You also need a throwaway key for the signing code: `openssl genrsa -out /tmp/test.pem 2048`, with `PRIVATE_KEY_PATH=/tmp/test.pem` and any value for `KALSHI_ACCESS_KEY`. The fake server ignores the headers.
@@ -72,7 +72,7 @@ asyncio.run(main())
   - Extend `error`, `seqgap`, and `badfield` yourself as you reach the tasks that use them: send a `{"type":"error",...}` frame, skip or duplicate a `seq`, and drop the `side` field from one delta.
   - Verify: run the fake server in `normal` mode, point the collector at it, and see one painter line per market in the fixture.
 
-- [ ] **0.5 Add linters and run them** `P2`
+- [x] **0.5 Add linters and run them** `P2`
   - `ruff check .`, `mypy kalshi_example.py data_models.py connection_utils.py data_verifiers.py`, `shellcheck copy_files.sh`.
   - Verify: all three report clean (or only suppressions you've reviewed).
 

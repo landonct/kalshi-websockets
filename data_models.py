@@ -1,6 +1,5 @@
+#! python
 from dataclasses import dataclass
-
-import numpy as np
 
 
 class NonEmptyBook(Exception):
@@ -96,7 +95,7 @@ class OFITracker:
     """
 
     def __init__(self) -> None:
-        self._prev = None  # (bid_px, bid_qty, ask_px, ask_qty)
+        self._prev: tuple[float, float, float, float] | None = None  # (bid_px, bid_qty, ask_px, ask_qty)
         self.ofi = 0.0
 
     def update(self, book: "OrderBook") -> None:

@@ -1,3 +1,4 @@
+#! python
 import json
 from pathlib import Path
 
@@ -25,7 +26,7 @@ def check_file(paths: list[Path]):
 
 def clean_data(paths: list[Path]):
     for path in paths:
-        prices = set()
+        # prices: set[str] = set()
 
         with open(path, "r") as f:
             for lines, line in enumerate(f, start=1):
@@ -33,6 +34,7 @@ def clean_data(paths: list[Path]):
                     thing = json.loads(line)
                     try:
                         message = json.loads(thing["msg"])
+                        print(message)
 
                     except json.JSONDecodeError:
                         print(f"Unable to decode inner json at line number {lines}")

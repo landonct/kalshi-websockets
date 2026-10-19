@@ -97,7 +97,7 @@ async def writer_task(queue: asyncio.Queue) -> None:
                 if f:
                     f.close()
                 path.parent.mkdir(parents=True, exist_ok=True)
-                f, current = open(path, "a"), path
+                f, current = open(path, "a"), path  # noqa: ASYNC230, SIM115
             assert f is not None
             f.write(json.dumps({"timestamp": ts, "msg": raw}) + "\n")
             if queue.empty():
@@ -166,9 +166,11 @@ async def display_loop(states: dict[str, MarketState], status: dict[str, str]) -
         lines = [f"[{status['text']}]"]  # constant-height header line
         for ticker, s in states.items():
             delta = s.stats["deltas"]
-            rate = max(0.0, delta - last_deltas[ticker]) * REFRESH_HZ  # counters restart at 0 on reconnect
-            last_deltas[ticker] = delta
-
+            if delta:
+                rate = max(0.0, delta - last_deltas[ticker]) * REFRESH_HZ  # counters restart at 0 on reconnect
+                last_deltas[ticker] = delta
+            else:
+                continue
             imb = s.book.book_imbalance() if s.book.ready else None
             if imb is None:
                 lines.append(f"{ticker:<40} | waiting for two-sided book")
@@ -237,6 +239,8 @@ async def orderbook_websocket(tickers: list[str]):
     painter = asyncio.create_task(display_loop(states, status), name="painter")
     try:
         while True:
+            if not KALSHI_ACCESS_KEY:
+                raise ValueError(f"KALSHI_ACCESS_KEY cannont be `{type(KALSHI_ACCESS_KEY)}`")
             ws_headers = create_headers(PRIVATE_KEY, "GET", "/trade-api/ws/v2", KALSHI_ACCESS_KEY)
             try:
                 async with websockets.connect(WS_URL, additional_headers=ws_headers, ping_interval=10, ping_timeout=20, open_timeout=10) as websocket:
