@@ -32,7 +32,7 @@ NY = ZoneInfo("America/New_York")
 PAINTER_RUNNING = False
 method = "GET"
 
-REFRESH_HZ = 10  # how many times per second to repaint the status line
+REFRESH_HZ = 1  # how many times per second to repaint the status line
 
 Path("logs").mkdir(exist_ok=True)
 logging.basicConfig(
@@ -207,7 +207,11 @@ async def handle_messages(websocket, tickers: list[str], states: dict[str, Marke
     unrouted: Counter = Counter()
 
     async for message in websocket:
-        queue.put_nowait((time.time_ns(), message))  # log first, whatever happens next
+        try:
+            queue.put_nowait((time.time_ns(), message))  # log first, whatever happens next
+        except asyncio.QueueFull:  # should never occur as queue size is infinite
+            LOGGER.warning("Queue is full, cannot add message of type %s", json.loads(message).get("type", "NONE"))
+            await queue.put((time.time_ns(), message))
 
         try:
             data = json.loads(message)
@@ -238,6 +242,15 @@ async def handle_messages(websocket, tickers: list[str], states: dict[str, Marke
                 LOGGER.exception("Bad frame, skipping: %.200r", message)
 
 
+def writer_done(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        LOGGER.error("writer task died: %r", exc)
+        sys.exit(1)
+
+
 async def orderbook_websocket(tickers: list[str]):
     tickers = [t.upper() for t in tickers]
     states = {t: new_state(t) for t in tickers}  # lives for the whole process
@@ -247,19 +260,21 @@ async def orderbook_websocket(tickers: list[str]):
     writer = asyncio.create_task(writer_task(queue), name="writer")
     painter = asyncio.create_task(display_loop(states, status), name="painter")
     error_reporter = asyncio.create_task(error_data_loop(errors, queue))
+    writer.add_done_callback(writer_done)
     try:
         while True:
             if not KALSHI_ACCESS_KEY:
                 raise ValueError(f"KALSHI_ACCESS_KEY cannont be `{type(KALSHI_ACCESS_KEY)}`")
             ws_headers = create_headers(PRIVATE_KEY, "GET", "/trade-api/ws/v2", KALSHI_ACCESS_KEY)
             try:
-                async with websockets.connect(WS_URL, additional_headers=ws_headers, ping_interval=10, ping_timeout=20, open_timeout=10) as websocket:
+                async with websockets.connect(
+                    WS_URL, additional_headers=ws_headers, ping_interval=10, ping_timeout=20, open_timeout=10
+                ) as websocket:  # this uses deflate compression; switch to none?
                     for t in tickers:  # fresh books, SAME dict object
                         states[t] = new_state(t)
                     status["text"] = "connected"
                     await handle_messages(websocket, tickers, states, queue, errors)
                 reason = "server closed the connection"
-                await asyncio.sleep(3)
             except websockets.exceptions.ConnectionClosed as e:
                 reason = f"Connection closed ({e!r})"
                 errors["ConnectionClosed"] += 1

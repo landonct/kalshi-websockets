@@ -86,11 +86,11 @@ def get_live_markets(series_ticker: str, *, limit: int = 100, page_limit: int = 
 def get_series_list(category: str, include_volume: bool = False, min_volume: float = 0, max_retries: int = 5) -> pd.DataFrame:
     backoff = 1
     retries = 0
-    params = {"category": category, "include_volume": include_volume}
+    params = {"category": category, "include_volume": str(include_volume).lower()}
     tickers: list[str] = []
     volume: list[float] = []
 
-    r = requests.get(SERIES_URL, params=params)
+    r = requests.get(SERIES_URL, params=params, timeout=10)
 
     while r.status_code == 429 and retries < max_retries:
         retry_after = r.headers.get("Retry-After")
@@ -106,7 +106,7 @@ def get_series_list(category: str, include_volume: bool = False, min_volume: flo
         time.sleep(delay)
         retries += 1
         backoff *= 2
-        r = requests.get(URL, params=params, timeout=10)
+        r = requests.get(SERIES_URL, params=params, timeout=10)
 
     r.raise_for_status()
 

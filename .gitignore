@@ -83,3 +83,5 @@ data
 *.zip
 
 *.toml
+*.pem
+*.key

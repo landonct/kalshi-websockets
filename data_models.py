@@ -10,6 +10,10 @@ class InvalidMarket(Exception):
     pass
 
 
+class DeadWriter(Exception):
+    pass
+
+
 class OrderBook:
     """Maintains a local Kalshi order book from snapshot + delta messages.
 
