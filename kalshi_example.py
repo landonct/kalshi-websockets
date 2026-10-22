@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 import time
 from collections import Counter
@@ -30,6 +31,7 @@ WS_URL = os.getenv("KALSHI_WS_URL", DEFAULT_WS_URL)
 LOG_ROOT = Path(os.getenv("KALSHI_DATA_DIR", "data_test" if WS_URL != DEFAULT_WS_URL else "data"))
 NY = ZoneInfo("America/New_York")
 PAINTER_RUNNING = False
+TIME_OFFSET = 0
 method = "GET"
 
 REFRESH_HZ = 1  # how many times per second to repaint the status line
@@ -83,8 +85,23 @@ def parse_args() -> argparse.Namespace:
 
 
 def log_path(ts_ns: int) -> Path:
-    t = datetime.fromtimestamp(ts_ns / 1e9, tz=NY)
+    t = datetime.fromtimestamp((ts_ns + TIME_OFFSET) / 1e9, tz=NY)
     return LOG_ROOT / t.strftime("%Y%m%d") / f"orderbook_{t.strftime('%H')}.txt"
+
+
+def _force_rotation(signum: int, frame):
+    global TIME_OFFSET
+    TIME_OFFSET += int(3600 * 1e9)
+    LOGGER.warning("Test hook: Moving timestamp an hour forward to crash writer")
+
+
+def _write_pid():
+    pid = os.getpid()
+    with open(Path(__file__).resolve().parent / "pid.txt", "w", encoding="utf-8") as f:
+        f.write(str(pid))
+
+
+signal.signal(signal.SIGUSR1, _force_rotation)
 
 
 async def writer_task(queue: asyncio.Queue) -> None:
@@ -242,13 +259,19 @@ async def handle_messages(websocket, tickers: list[str], states: dict[str, Marke
                 LOGGER.exception("Bad frame, skipping: %.200r", message)
 
 
-def writer_done(task: asyncio.Task) -> None:
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc:
-        LOGGER.error("writer task died: %r", exc)
-        sys.exit(1)
+async def supervised_writer(queue: asyncio.Queue, restart_timer: int = 1, max_retries: int = 5):
+    cur_retries = 0
+    while True:
+        try:
+            await writer_task(queue)
+            cur_retries = 0
+        except Exception:
+            cur_retries += 1
+            LOGGER.exception("writer died, restarting in %d seconds. (%d/%d) retries", restart_timer, cur_retries, max_retries)
+            await asyncio.sleep(restart_timer)
+            if cur_retries >= max_retries:
+                LOGGER.critical("Writer died and could not be restarted. Terminating the program")  # todo #12
+                sys.exit(1)
 
 
 async def orderbook_websocket(tickers: list[str]):
@@ -257,10 +280,9 @@ async def orderbook_websocket(tickers: list[str]):
     status = {"text": "connecting"}  # shown on a header line
     queue: asyncio.Queue = asyncio.Queue()
     errors: Counter = Counter()
-    writer = asyncio.create_task(writer_task(queue), name="writer")
+    writer = asyncio.create_task(supervised_writer(queue), name="writer")
     painter = asyncio.create_task(display_loop(states, status), name="painter")
     error_reporter = asyncio.create_task(error_data_loop(errors, queue))
-    writer.add_done_callback(writer_done)
     try:
         while True:
             if not KALSHI_ACCESS_KEY:
@@ -295,6 +317,7 @@ async def orderbook_websocket(tickers: list[str]):
 
 
 def main():
+    _write_pid()
     args = parse_args()
     if args.file:
         book = OrderBook(market_ticker="replay")

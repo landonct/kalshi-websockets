@@ -4,15 +4,26 @@
 import asyncio
 import datetime
 import json
+import os
 import random
+import signal
 import sys
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from websockets import ServerConnection
 from websockets.asyncio.server import serve
 
 FIXTURE = "tests/fixtures/sample.jsonl"
 MODE = sys.argv[1] if len(sys.argv) > 1 else "normal"
+CLIENT_PID = -1
 # modes: normal | drop | garbage | error | silent | seqgap | badfield
+
+
+def _read_pid() -> int:
+    with open(Path(__file__).resolve().parent.parent / "pid.txt", "r") as f:
+        pid = f.readline()
+    return int(pid)
 
 
 async def handler(ws: ServerConnection):
@@ -54,6 +65,14 @@ async def handler(ws: ServerConnection):
                 badfield_frame = json.loads(frame)
                 badfield_frame["msg"].pop("side", None)
                 frame = json.dumps(badfield_frame)
+            if MODE == "killwriter" and i == rand_num:
+                CLIENT_PID = _read_pid()
+                print("Killing the writer by making the orderbook file read only!")
+                now = datetime.datetime.now(ZoneInfo("America/New_York"))
+                base = Path(__file__).resolve().parent.parent
+                day_dir = base / "data_test" / now.strftime("%Y%m%d")
+                os.chmod(day_dir, mode=0o555)
+                os.kill(CLIENT_PID, signal.SIGUSR1)
 
             await ws.send(frame)
             await asyncio.sleep(0.001)
@@ -67,6 +86,11 @@ async def main():
             await asyncio.Future()
     except KeyboardInterrupt:
         print("Stopping the server")
+        now = datetime.datetime.now(ZoneInfo("America/New_York"))
+        base = Path(__file__).resolve().parent.parent
+        day_dir = base / "data_test" / now.strftime("%Y%m%d")
+        if MODE == "killwriter":
+            os.chmod(day_dir, mode=0o666)
 
 
 asyncio.run(main())
