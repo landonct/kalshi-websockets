@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import sys
 import time
@@ -63,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--series", type=str, help="Kalshi series ticker to subscribe to")
     parser.add_argument("--volume", type=float, default=0.0, help="Minimum volume for a series (only used with --category)")
     parser.add_argument("--tickers", nargs="+", default=[], help="List of kalshi tickers to subscribe to")
+    parser.add_argument("--ack-wait", type=int, default=15, help="Maximum amount of time to wait for a 'subscribed' acknowledgement from the server")
     # todo #9
 
     args = parser.parse_args()
@@ -131,7 +133,6 @@ def log_message(msg: str, file: TextIO) -> None:
 
 def classify_message(data: Any, msg: dict[str, str | int], msg_type: str, *, book: OrderBook, ofi: OFITracker, stats: dict[str, float | None]) -> None:
     if msg_type == "subscribed":
-        # \n first so we don't leave the status line half-drawn above.
         LOGGER.info(f"Subscribed: {data}")
 
     elif msg_type == "orderbook_snapshot":
@@ -182,17 +183,21 @@ async def display_loop(states: dict[str, MarketState], status: dict[str, str]) -
         await asyncio.sleep(period)
         lines = [f"[{status['text']}]"]  # constant-height header line
         for ticker, s in states.items():
-            delta = s.stats["deltas"]
-            if delta:
-                rate = max(0.0, delta - last_deltas[ticker]) * REFRESH_HZ  # counters restart at 0 on reconnect
-                last_deltas[ticker] = delta
-            else:
-                continue
-            imb = s.book.book_imbalance() if s.book.ready else None
-            if imb is None:
-                lines.append(f"{ticker:<40} | waiting for two-sided book")
-            else:
-                lines.append(f"{ticker:<40} | imb {imb:+.3f} | OFI {s.ofi.ofi:+8.1f} | {rate:>4.0f} upd/s")
+            try:
+                delta = s.stats["deltas"]
+                if delta:
+                    rate = max(0.0, delta - last_deltas[ticker]) * REFRESH_HZ  # counters restart at 0 on reconnect
+                    last_deltas[ticker] = delta
+                else:
+                    continue
+                imb = s.book.book_imbalance() if s.book.ready else None
+                if imb is None:
+                    lines.append(f"{ticker:<40} | waiting for two-sided book")
+                else:
+                    lines.append(f"{ticker:<40} | imb {imb:+.3f} | OFI {s.ofi.ofi:+8.1f} | {rate:>4.0f} upd/s")
+            except Exception:
+                LOGGER.exception(f"ticker {ticker} failed to render in the painter")
+                lines.append(f"{ticker:<40} | display error")
 
         # \033[K clears to end of line so a shorter line doesn't leave leftovers.
         frame = "\n".join(line + "\033[K" for line in lines)
@@ -218,12 +223,21 @@ async def error_data_loop(errors: Counter, queue: asyncio.Queue):
         LOGGER.info("errors=%s queue_size=%d", dict(errors), queue.qsize())
 
 
-async def handle_messages(websocket, tickers: list[str], states: dict[str, MarketState], queue: asyncio.Queue, errors: Counter) -> None:
+async def handle_messages(websocket, tickers: list[str], states: dict[str, MarketState], queue: asyncio.Queue, errors: Counter, ack_wait: int = 5) -> None:
     """Subscribe, then route frames to per-market state until the connection ends."""
     await subscribe_to_ws(websocket, tickers)
+    pending_channels = {"orderbook_delta", "trade"}
     unrouted: Counter = Counter()
 
-    async for message in websocket:
+    while True:
+        timeout = ack_wait if pending_channels else None
+        try:
+            message = await asyncio.wait_for(websocket.recv(), timeout=timeout)
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(f"Timed out waiting for a subscription ack(s): {pending_channels}") from e
+        except websockets.exceptions.ConnectionClosedOK:
+            return
+
         try:
             queue.put_nowait((time.time_ns(), message))  # log first, whatever happens next
         except asyncio.QueueFull:  # should never occur as queue size is infinite
@@ -236,7 +250,9 @@ async def handle_messages(websocket, tickers: list[str], states: dict[str, Marke
             msg = data.get("msg", {})
 
             if msg_type == "subscribed":
-                LOGGER.info("Subscribed: channel=%s sid=%s", msg.get("channel"), msg.get("sid"))
+                channel = msg.get("channel")
+                pending_channels.discard(channel)
+                LOGGER.info("Subscribed: channel=%s sid=%s", channel, msg.get("sid"))
                 continue
 
             if msg_type == "error":
@@ -274,14 +290,30 @@ async def supervised_writer(queue: asyncio.Queue, restart_timer: int = 1, max_re
                 sys.exit(1)
 
 
-async def orderbook_websocket(tickers: list[str]):
+async def supervised_painter(states: dict[str, MarketState], status: dict[str, str], restart_timer: int = 1, max_retries: int = 5):
+    cur_retries = 0
+    while True:
+        try:
+            await display_loop(states, status)
+            cur_retries = 0
+        except Exception:
+            cur_retries += 1
+            LOGGER.exception("painter died, restarting in %d seconds. (%d/%d) retries", restart_timer, cur_retries, max_retries)
+            await asyncio.sleep(restart_timer)
+            if cur_retries >= max_retries:
+                LOGGER.error("painter died and could not be restarted. continuing without the painter")
+
+
+async def orderbook_websocket(tickers: list[str], ack_wait: int):
+    retry_wait = 3
+    max_retries = 5
     tickers = [t.upper() for t in tickers]
     states = {t: new_state(t) for t in tickers}  # lives for the whole process
     status = {"text": "connecting"}  # shown on a header line
     queue: asyncio.Queue = asyncio.Queue()
     errors: Counter = Counter()
     writer = asyncio.create_task(supervised_writer(queue), name="writer")
-    painter = asyncio.create_task(display_loop(states, status), name="painter")
+    painter = asyncio.create_task(supervised_painter(states, status), name="painter")
     error_reporter = asyncio.create_task(error_data_loop(errors, queue))
     try:
         while True:
@@ -300,17 +332,31 @@ async def orderbook_websocket(tickers: list[str]):
             except websockets.exceptions.ConnectionClosed as e:
                 reason = f"Connection closed ({e!r})"
                 errors["ConnectionClosed"] += 1
+            except TimeoutError as e:
+                reason = f"Connection timed out({e!r})"
+                errors[type(e).__name__] += 1
+                if errors[type(e).__name__] >= max_retries:
+                    LOGGER.critical("Connection continued to timeout after %d retries. Terminating the program", max_retries)
+                    sys.exit(2)
             except OSError as e:
                 reason = f"Network error ({e!r})"
                 errors[type(e).__name__] += 1
+            except websockets.exceptions.InvalidStatus as e:
+                LOGGER.exception("Connection failed")
+                reason = f"Connection failed ({e!r:.{shutil.get_terminal_size().columns - 40}})"
+                errors[type(e).__name__] += 1
+                retry_wait = 2 ** (errors[type(e).__name__] - 1)
+                if errors[type(e).__name__] >= max_retries:
+                    LOGGER.critical("Connection could not be restored after %d retries. Terminating the program", max_retries)
+                    sys.exit(2)
             except Exception:
                 LOGGER.exception("Unexpected error in connection loop")
                 reason = "unexpected error"
                 errors["unexpected"] += 1
 
-            status["text"] = f"{reason}, retrying in 3s"
-            LOGGER.warning("%s, reconnection in 3 seconds", reason)
-            await asyncio.sleep(3)
+            status["text"] = f"{reason}, retrying in {retry_wait}s"
+            LOGGER.warning("%s, reconnection in %d seconds", reason, retry_wait)
+            await asyncio.sleep(retry_wait)
     finally:
         for thing in (painter, writer, error_reporter):
             thing.cancel()
@@ -338,7 +384,7 @@ def main():
     all_tickers = [ticker for tickers in markets.values() for ticker in tickers]
     print(f"Subscribing to {len(all_tickers)} markets across {len(markets)} series")
     try:
-        asyncio.run(orderbook_websocket(all_tickers))
+        asyncio.run(orderbook_websocket(all_tickers, args.ack_wait))
     except KeyboardInterrupt:
         print("\nStopped.")
 

@@ -8,6 +8,7 @@ import os
 import random
 import signal
 import sys
+from http import HTTPStatus
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -40,7 +41,7 @@ async def handler(ws: ServerConnection):
             if MODE == "garbage" and i % 10 == rand_num:
                 print("Garbage sent")
                 await ws.send("{not json")  # data garbage
-            if MODE == "silent" and i == rand_num:
+            if MODE == "silent" and i == 0:  # rand_num:
                 print("Not responding for 300 sec")
                 await asyncio.sleep(300)  # dead socket
             if MODE == "error" and i == rand_num:
@@ -80,17 +81,27 @@ async def handler(ws: ServerConnection):
         print("Out of data, looping over it again!")
 
 
-async def main():
-    try:
-        async with serve(handler, "localhost", 8765):
-            await asyncio.Future()
-    except KeyboardInterrupt:
-        print("Stopping the server")
+def process_response(connection, request, response):
+    return connection.respond(HTTPStatus.TOO_MANY_REQUESTS, "Too many requests") if MODE == "manyreq" else None
+
+
+def restore_prems():
+    if MODE == "killwriter":
         now = datetime.datetime.now(ZoneInfo("America/New_York"))
         base = Path(__file__).resolve().parent.parent
         day_dir = base / "data_test" / now.strftime("%Y%m%d")
-        if MODE == "killwriter":
-            os.chmod(day_dir, mode=0o666)
+        if day_dir.exists():
+            os.chmod(day_dir, mode=0o775)
 
 
-asyncio.run(main())
+async def main():
+    async with serve(handler, "localhost", 8765, process_response=process_response):
+        await asyncio.Future()
+
+
+try:
+    asyncio.run(main())
+except KeyboardInterrupt:
+    print("Stopping the server")
+finally:
+    restore_prems()

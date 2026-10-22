@@ -85,16 +85,16 @@ asyncio.run(main())
   - Today only `ConnectionClosed` and `OSError` are caught anywhere, so one malformed frame ends the process.
   - Verify: run the fake server in `garbage` mode. The process keeps running, the `errors` counter equals the number of frames injected, and each bad frame appears in the app log. Also run `badfield` mode (a delta with no `side`) and confirm the same.
 
-- [ ] **1.2 Supervise background tasks (painter and writer)** `P0`
+- [x] **1.2 Supervise background tasks (painter and writer)** `P0`
   - Add `task.add_done_callback(...)` that logs any exception. A dead **writer** is fatal: stop the program with a non-zero exit, because the queue would otherwise grow forever while you believe you're collecting.
   - Verify (writer): make `data/` read-only (`chmod -w data`) before the first write. Expect a logged error and exit code ≠ 0 within a few seconds, not a silent hang.
   - Verify (painter): in a test, monkeypatch `book_imbalance` to raise. The exception must show up in the log.
 
-- [ ] **1.3 Make the painter exception-safe** `P0`
+- [x] **1.3 Make the painter exception-safe** `P0`
   - Wrap each market's line in `try/except`, and render a placeholder line like `ticker | display error` for the failing market.
   - Verify: the painter test from 1.2 passes, and the other markets' lines still render.
 
-- [ ] **1.4 Handle server `error` and the subscribe acknowledgement** `P0`
+- [x] **1.4 Handle server `error` and the subscribe acknowledgement** `P0`
   - Check `msg_type == "error"` **before** the "no market_ticker → control message" `continue`, and log it at WARNING. After subscribing, require a `subscribed` ack within N seconds, otherwise treat the connection as failed and reconnect.
   - Verify: fake server `error` mode produces a WARNING in the log. A fake server that never acks triggers a reconnect after the timeout.
 
