@@ -82,7 +82,13 @@ async def handler(ws: ServerConnection):
 
 
 def process_response(connection, request, response):
-    return connection.respond(HTTPStatus.TOO_MANY_REQUESTS, "Too many requests") if MODE == "manyreq" else None
+    if MODE == "manyreq":
+        return connection.respond(HTTPStatus.TOO_MANY_REQUESTS, "Too many requests")
+    if MODE == "badcred":
+        return connection.respond(HTTPStatus.UNAUTHORIZED, "Server denied the request")
+    if MODE == "notfound":
+        return connection.respond(HTTPStatus.NOT_FOUND, "The requested address was not found")
+    return None
 
 
 def restore_prems():

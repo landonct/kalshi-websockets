@@ -98,7 +98,7 @@ asyncio.run(main())
   - Check `msg_type == "error"` **before** the "no market_ticker → control message" `continue`, and log it at WARNING. After subscribing, require a `subscribed` ack within N seconds, otherwise treat the connection as failed and reconnect.
   - Verify: fake server `error` mode produces a WARNING in the log. A fake server that never acks triggers a reconnect after the timeout.
 
-- [ ] **1.5 Handle handshake failures** `P0`
+- [x] **1.5 Handle handshake failures** `P0`
   - `websockets.exceptions.InvalidStatus` (bad credentials, clock skew, rate limit) is not an `OSError` and currently crashes. Decide per status code: 401/403 log clearly and exit non-zero; 429/5xx back off and retry. Check what Kalshi returns, and write it in a comment.
   - Verify: have the fake server reject the handshake with 401 (e.g. via `process_request`). The collector logs the cause and exits non-zero without looping. With a 429, it retries with growing delays.
 
@@ -107,15 +107,15 @@ asyncio.run(main())
   - Anchor `.env`, `logs/` and `data/` to `Path(__file__).resolve().parent`, so cron and systemd don't depend on the working directory.
   - Verify: `env -u KALSHI_ACCESS_KEY python kalshi_example.py --series X` prints one clean error and `echo $?` is non-zero. Running from another directory (`cd /tmp && python /home/lando/kalshi-websockets/kalshi_example.py ...`) still writes into the repo's `data/` and `logs/`.
 
-- [ ] **1.7 Retries on startup REST calls** `P1`
+- [x] **1.7 Retries on startup REST calls** `P1`
   - `get_live_markets` and `get_series_list` currently raise on the first network error. Wrap discovery in a retry with backoff (see 6.1).
   - Verify: run with the network off, then turn it on within the retry window. Startup succeeds.
 
-- [ ] **1.8 Meaningful exit codes** `P1`
+- [x] **1.8 Meaningful exit codes** `P1`
   - Clean shutdown (SIGINT/SIGTERM) exits 0. Fatal errors exit non-zero. Systemd and cron decide whether to restart based on this.
   - Verify: `echo $?` after each case: Ctrl-C → 0, fatal → non-zero.
 
-- [ ] **1.9 Don't record sentinel prices** `P2`
+- [x] **1.9 Don't record sentinel prices** `P2`
   - `float(msg.get("yes_price_dollars", -1.0))` stores `-1.0` as a trade price when the field is missing. Skip the update and count it as a malformed trade instead.
   - Verify: unit test passing a trade without that field leaves `last_trade` unchanged and increments an error counter.
 
@@ -253,7 +253,7 @@ def test_ofi_branches(bid, ask, expected):
 
 ## Phase 4: Logging correctness
 
-- [ ] **4.1 Counters and the "received == written" invariant** `P0`
+- [x] **4.1 Counters and the "received == written" invariant** `P0`
   - Count frames received, enqueued, written, and errors. Log them plus `queue.qsize()` every 60s, and once at shutdown.
   - Verify: after a clean shutdown, `received == written`. Cross-check against the file: `wc -l` on the day's files equals `written` (plus marker lines).
 

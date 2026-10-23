@@ -22,14 +22,15 @@ from connection_utils import create_headers, get_live_markets, get_series_list, 
 from data_models import InvalidMarket, MarketState, OFITracker, OrderBook
 from data_verifiers import replay_json
 
-load_dotenv(".env")
+ROOT_DIR = Path(__file__).resolve().parent
+load_dotenv(ROOT_DIR / ".env")
 KALSHI_ACCESS_KEY = os.getenv("KALSHI_ACCESS_KEY")
 PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH")
 PRIVATE_KEY = load_private_key_from_file(PRIVATE_KEY_PATH)
 LOCAL_WS_URL = "ws://localhost:8765"
 DEFAULT_WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 WS_URL = os.getenv("KALSHI_WS_URL", DEFAULT_WS_URL)
-LOG_ROOT = Path(os.getenv("KALSHI_DATA_DIR", "data_test" if WS_URL != DEFAULT_WS_URL else "data"))
+DATA_ROOT = Path(os.getenv("KALSHI_DATA_DIR", f"{ROOT_DIR}/data_test" if WS_URL != DEFAULT_WS_URL else f"{ROOT_DIR}/data"))
 NY = ZoneInfo("America/New_York")
 PAINTER_RUNNING = False
 TIME_OFFSET = 0
@@ -37,11 +38,11 @@ method = "GET"
 
 REFRESH_HZ = 1  # how many times per second to repaint the status line
 
-Path("logs").mkdir(exist_ok=True)
+Path(f"{ROOT_DIR}/logs").mkdir(exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    filename=f"logs/kalshi_example_{datetime.now(tz=ZoneInfo('America/New_York')).strftime('%Y%m%d')}.log",
+    filename=f"{ROOT_DIR}/logs/kalshi_example_{datetime.now(tz=ZoneInfo('America/New_York')).strftime('%Y%m%d')}.log",
     filemode="a",  # 'w' overwrites the file; 'a' appends (default)
 )
 LOGGER = logging.getLogger()
@@ -68,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     # todo #9
 
     args = parser.parse_args()
-    if args.file is not None and not Path(args.file).is_file():
+    if args.file is not None and not Path(f"{ROOT_DIR}/{args.file}").is_file():
         raise FileNotFoundError(f"{args.file} does not exist.")
     if args.log:
         LOGGER.info("Logging mode enabled")
@@ -86,9 +87,22 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def log_path(ts_ns: int) -> Path:
+def _verify_env() -> None:
+    root = Path(__file__).resolve().parent
+    if not KALSHI_ACCESS_KEY:
+        print("No value for KALSHI_ACCESS_KEY found", file=sys.stderr)
+        sys.exit(4)
+    if not PRIVATE_KEY_PATH:
+        print("No value for PRIVATE_KEY_PATH found", file=sys.stderr)
+        sys.exit(4)
+    if not (root / PRIVATE_KEY_PATH).is_file():
+        print("Cannot find file pointed to by PRIVATE_KEY_PATH", file=sys.stderr)
+        sys.exit(5)
+
+
+def _data_path(ts_ns: int) -> Path:
     t = datetime.fromtimestamp((ts_ns + TIME_OFFSET) / 1e9, tz=NY)
-    return LOG_ROOT / t.strftime("%Y%m%d") / f"orderbook_{t.strftime('%H')}.txt"
+    return DATA_ROOT / t.strftime("%Y%m%d") / f"orderbook_{t.strftime('%H')}.txt"
 
 
 def _force_rotation(signum: int, frame):
@@ -99,19 +113,19 @@ def _force_rotation(signum: int, frame):
 
 def _write_pid():
     pid = os.getpid()
-    with open(Path(__file__).resolve().parent / "pid.txt", "w", encoding="utf-8") as f:
+    with open(ROOT_DIR / "pid.txt", "w", encoding="utf-8") as f:
         f.write(str(pid))
 
 
 signal.signal(signal.SIGUSR1, _force_rotation)
 
 
-async def writer_task(queue: asyncio.Queue) -> None:
+async def writer_task(queue: asyncio.Queue, written: Counter) -> None:
     f, current = None, None
     try:
         while True:
             ts, raw = await queue.get()
-            path = log_path(ts)
+            path = _data_path(ts)
             if path != current:
                 if f:
                     f.close()
@@ -119,6 +133,7 @@ async def writer_task(queue: asyncio.Queue) -> None:
                 f, current = open(path, "a"), path  # noqa: ASYNC230, SIM115
             assert f is not None
             f.write(json.dumps({"timestamp": ts, "msg": raw}) + "\n")
+            written["written"] += 1
             if queue.empty():
                 f.flush()
     finally:
@@ -156,7 +171,12 @@ def classify_message(data: Any, msg: dict[str, str | int], msg_type: str, *, boo
             stats["trades"] = 1
         # Trade msg fields (confirmed): yes_price_dollars / no_price_dollars,
         # count_fp (size), taker_side ('yes'/'no'), taker_book_side.
-        price = float(msg.get("yes_price_dollars", -1.0))
+        price = msg.get("yes_price_dollars")
+        if price:
+            price = float(str(price))
+        else:
+            LOGGER.warning(f"No price found for trade: {msg}")
+            return
         # count = float(msg.get("count_fp", 0))
         # side = msg.get("taker_side", "")
         stats["last_trade"] = price  # f"{count:.0f}@{price} {side}"
@@ -166,6 +186,12 @@ def classify_message(data: Any, msg: dict[str, str | int], msg_type: str, *, boo
 
     else:
         LOGGER.warning(f"\nUnhandled message type {msg_type!r}: {data}")
+
+
+async def _reset_ofi(states: dict[str, MarketState], interval: int):
+    while True:
+        await asyncio.sleep(interval)
+        {state.ofi.reset() for state in states.values()}
 
 
 async def display_loop(states: dict[str, MarketState], status: dict[str, str]) -> None:
@@ -217,13 +243,13 @@ def new_state(t: str) -> MarketState:
     return MarketState(ticker=t, book=OrderBook(t), ofi=OFITracker(), stats={"deltas": 0.0, "trades": 0.0, "last_trade": None})
 
 
-async def error_data_loop(errors: Counter, queue: asyncio.Queue):
+async def error_data_loop(errors: Counter, frames: Counter, written: Counter, queue: asyncio.Queue, *, loop_interval: int = 60):
     while True:
-        await asyncio.sleep(60)
-        LOGGER.info("errors=%s queue_size=%d", dict(errors), queue.qsize())
+        await asyncio.sleep(loop_interval)
+        LOGGER.info("errors=%s frames=%s written=%s queue_size=%d", dict(errors), dict(frames), dict(written), queue.qsize())
 
 
-async def handle_messages(websocket, tickers: list[str], states: dict[str, MarketState], queue: asyncio.Queue, errors: Counter, ack_wait: int = 5) -> None:
+async def handle_messages(websocket, tickers: list[str], states: dict[str, MarketState], queue: asyncio.Queue, errors: Counter, frames: Counter, *, ack_wait: int = 5) -> None:
     """Subscribe, then route frames to per-market state until the connection ends."""
     await subscribe_to_ws(websocket, tickers)
     pending_channels = {"orderbook_delta", "trade"}
@@ -250,12 +276,14 @@ async def handle_messages(websocket, tickers: list[str], states: dict[str, Marke
             msg = data.get("msg", {})
 
             if msg_type == "subscribed":
+                frames["subscribed"] += 1
                 channel = msg.get("channel")
                 pending_channels.discard(channel)
                 LOGGER.info("Subscribed: channel=%s sid=%s", channel, msg.get("sid"))
                 continue
 
             if msg_type == "error":
+                frames["error"] += 1
                 LOGGER.warning("Server error: %s", data)
                 continue
 
@@ -267,6 +295,7 @@ async def handle_messages(websocket, tickers: list[str], states: dict[str, Marke
                     LOGGER.warning("Frame for unsubscribed ticker %r (type=%s)", ticker, msg_type)
                 continue
 
+            frames[ticker] += 1
             classify_message(data, msg, msg_type, book=state.book, ofi=state.ofi, stats=state.stats)
 
         except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError) as e:
@@ -275,11 +304,11 @@ async def handle_messages(websocket, tickers: list[str], states: dict[str, Marke
                 LOGGER.exception("Bad frame, skipping: %.200r", message)
 
 
-async def supervised_writer(queue: asyncio.Queue, restart_timer: int = 1, max_retries: int = 5):
+async def supervised_writer(queue: asyncio.Queue, written: Counter, *, restart_timer: int = 1, max_retries: int = 5):
     cur_retries = 0
     while True:
         try:
-            await writer_task(queue)
+            await writer_task(queue, written)
             cur_retries = 0
         except Exception:
             cur_retries += 1
@@ -304,7 +333,7 @@ async def supervised_painter(states: dict[str, MarketState], status: dict[str, s
                 LOGGER.error("painter died and could not be restarted. continuing without the painter")
 
 
-async def orderbook_websocket(tickers: list[str], ack_wait: int):
+async def orderbook_websocket(tickers: list[str], ack_wait: int, ofi_interval: int = 10):
     retry_wait = 3
     max_retries = 5
     tickers = [t.upper() for t in tickers]
@@ -312,9 +341,12 @@ async def orderbook_websocket(tickers: list[str], ack_wait: int):
     status = {"text": "connecting"}  # shown on a header line
     queue: asyncio.Queue = asyncio.Queue()
     errors: Counter = Counter()
-    writer = asyncio.create_task(supervised_writer(queue), name="writer")
+    frames: Counter = Counter()
+    written: Counter = Counter()
+    ofi_refresher = asyncio.create_task(_reset_ofi(states, ofi_interval), name="ofi_refresher")
+    writer = asyncio.create_task(supervised_writer(queue, written), name="writer")
     painter = asyncio.create_task(supervised_painter(states, status), name="painter")
-    error_reporter = asyncio.create_task(error_data_loop(errors, queue))
+    error_reporter = asyncio.create_task(error_data_loop(errors, frames, written, queue))
     try:
         while True:
             if not KALSHI_ACCESS_KEY:
@@ -327,7 +359,7 @@ async def orderbook_websocket(tickers: list[str], ack_wait: int):
                     for t in tickers:  # fresh books, SAME dict object
                         states[t] = new_state(t)
                     status["text"] = "connected"
-                    await handle_messages(websocket, tickers, states, queue, errors)
+                    await handle_messages(websocket, tickers, states, queue, errors, frames)
                 reason = "server closed the connection"
             except websockets.exceptions.ConnectionClosed as e:
                 reason = f"Connection closed ({e!r})"
@@ -348,21 +380,22 @@ async def orderbook_websocket(tickers: list[str], ack_wait: int):
                 retry_wait = 2 ** (errors[type(e).__name__] - 1)
                 if errors[type(e).__name__] >= max_retries:
                     LOGGER.critical("Connection could not be restored after %d retries. Terminating the program", max_retries)
-                    sys.exit(2)
+                    sys.exit(3)
             except Exception:
                 LOGGER.exception("Unexpected error in connection loop")
                 reason = "unexpected error"
                 errors["unexpected"] += 1
 
             status["text"] = f"{reason}, retrying in {retry_wait}s"
-            LOGGER.warning("%s, reconnection in %d seconds", reason, retry_wait)
+            LOGGER.warning("%s, reconnecting in %d seconds", reason, retry_wait)
             await asyncio.sleep(retry_wait)
     finally:
-        for thing in (painter, writer, error_reporter):
+        for thing in (painter, writer, error_reporter, ofi_refresher):
             thing.cancel()
 
 
 def main():
+    _verify_env()
     _write_pid()
     args = parse_args()
     if args.file:

@@ -1,5 +1,7 @@
 #! python
 import base64
+import logging
+import sys
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -14,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 URL = "https://external-api.kalshi.com/trade-api/v2/markets"
 SERIES_URL = "https://external-api.kalshi.com/trade-api/v2/series"
+logger = logging.getLogger(__name__)
 
 
 def load_private_key_from_file(file_path):
@@ -44,31 +47,46 @@ def create_headers(private_key, method: str, path: str, key: str) -> dict:
     return {"Content-Type": "application/json", "KALSHI-ACCESS-KEY": key, "KALSHI-ACCESS-SIGNATURE": signature, "KALSHI-ACCESS-TIMESTAMP": timestamp}
 
 
-def get_live_markets(series_ticker: str, *, limit: int = 100, page_limit: int = 1000, max_retries: int = 5) -> list[str]:
+def _retry_delay(r: requests.Response, backoff: int):
+    retry_after = r.headers.get("Retry-After")
+    if retry_after:
+        try:
+            delay = float(retry_after)
+        except ValueError:
+            delay = backoff
+    else:
+        delay = backoff
+
+    return delay
+
+
+def get_live_markets(series_ticker: str, *, limit: int = 100, page_limit: int = 1000, max_retries: int = 5, timeout: int = 10) -> list[str]:
     params: dict = {"status": "open", "limit": page_limit, "series_ticker": series_ticker}
     tickers: list[str] = []
     while True:
         backoff = 1
         retries = 0
-        r = requests.get(URL, params=params, timeout=10)
+        try:
+            r = requests.get(URL, params=params, timeout=timeout)
 
-        while r.status_code == 429 and retries < max_retries:
-            retry_after = r.headers.get("Retry-After")
-            if retry_after:
-                try:
-                    delay = float(retry_after)
-                except ValueError:
-                    delay = backoff
-            else:
-                delay = backoff
+            while r.status_code == 429 and retries <= max_retries:
+                if retries >= max_retries:
+                    logger.critical("Connection could not be reestablished after %d retries. Terminating the program", retries)
+                    sys.exit(6)
+                delay = _retry_delay(r, backoff)
+                logger.warning(f"Rate limited on series {series_ticker}. Retrying ({retries + 1}/{max_retries}) after {delay} seconds...")
+                time.sleep(delay)
+                retries += 1
+                backoff *= 2
+                r = requests.get(URL, params=params, timeout=timeout)
 
-            print(f"Rate limited. Retrying ({retries + 1}/{max_retries}) after {delay} seconds...")
-            time.sleep(delay)
-            retries += 1
-            backoff *= 2
-            r = requests.get(URL, params=params, timeout=10)
-
-        r.raise_for_status()
+            r.raise_for_status()
+        except requests.HTTPError as e:
+            logger.error(f"Markets request failed for {series_ticker}: HTTP {e.response.status_code}: {e.response.text:.200}")
+            raise
+        except requests.RequestException:
+            logger.exception(f"Markets request failed for {series_ticker}")
+            raise
 
         data = r.json()
         new_tickers = [m["ticker"] for m in data.get("markets", [])]
@@ -83,30 +101,25 @@ def get_live_markets(series_ticker: str, *, limit: int = 100, page_limit: int = 
         params["cursor"] = cursor
 
 
-def get_series_list(category: str, include_volume: bool = False, min_volume: float = 0, max_retries: int = 5) -> pd.DataFrame:
+def get_series_list(category: str, include_volume: bool = False, min_volume: float = 0, max_retries: int = 5, timeout: int = 5) -> pd.DataFrame:
     backoff = 1
     retries = 0
     params = {"category": category, "include_volume": str(include_volume).lower()}
     tickers: list[str] = []
     volume: list[float] = []
 
-    r = requests.get(SERIES_URL, params=params, timeout=10)
+    r = requests.get(SERIES_URL, params=params, timeout=timeout)
 
-    while r.status_code == 429 and retries < max_retries:
-        retry_after = r.headers.get("Retry-After")
-        if retry_after:
-            try:
-                delay = float(retry_after)
-            except ValueError:
-                delay = backoff
-        else:
-            delay = backoff
-
-        print(f"Rate limited. Retrying ({retries + 1}/{max_retries}) after {delay} seconds...")
+    while r.status_code == 429 and retries <= max_retries:
+        if retries >= max_retries:
+            logger.critical("Connection could not be reestablished after %d retries. Terminating the program", retries)
+            sys.exit(6)
+        delay = _retry_delay(r, backoff)
+        logger.warning(f"Rate limited on category {category}. Retrying ({retries + 1}/{max_retries}) after {delay} seconds...")
         time.sleep(delay)
         retries += 1
         backoff *= 2
-        r = requests.get(SERIES_URL, params=params, timeout=10)
+        r = requests.get(SERIES_URL, params=params, timeout=timeout)
 
     r.raise_for_status()
 
