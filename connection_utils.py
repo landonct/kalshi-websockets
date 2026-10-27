@@ -132,3 +132,21 @@ def get_series_list(category: str, include_volume: bool = False, min_volume: flo
     df = df.sort_values("volume") if include_volume else df.sort_values("tickers")
 
     return df[df["volume"] > min_volume].reset_index(drop=True) if include_volume else df[["tickers"]].reset_index(drop=True)
+
+
+def fetch_markets(series_tickers: list[str], **kwargs) -> dict[str, list[str]]:
+    markets: dict[str, list[str]] = {}
+    failed: list[str] = []
+    for ticker in series_tickers:
+        try:
+            markets[ticker] = get_live_markets(ticker, **kwargs)
+        except requests.RequestException:
+            logger.warning(f"Skipping series {ticker}")
+            failed.append(ticker)
+
+    if failed:
+        logger.warning("Failed to fetch %d series: %s", len(failed), ", ".join(failed))
+    if not markets:
+        logger.critical("Failed to fetch ALL markets. Terminating the program")
+        sys.exit(8)
+    return markets

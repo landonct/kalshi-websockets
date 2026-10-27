@@ -15,10 +15,11 @@ from pathlib import Path
 from typing import Any, TextIO
 from zoneinfo import ZoneInfo
 
+import requests
 import websockets
 from dotenv import load_dotenv
 
-from connection_utils import create_headers, get_live_markets, get_series_list, load_private_key_from_file
+from connection_utils import create_headers, fetch_markets, get_live_markets, get_series_list, load_private_key_from_file
 from data_models import InvalidMarket, MarketState, OFITracker, OrderBook
 from data_verifiers import replay_json
 
@@ -34,6 +35,7 @@ DATA_ROOT = Path(os.getenv("KALSHI_DATA_DIR", f"{ROOT_DIR}/data_test" if WS_URL 
 NY = ZoneInfo("America/New_York")
 PAINTER_RUNNING = False
 TIME_OFFSET = 0
+FLUSH_TIME = 1.0
 method = "GET"
 
 REFRESH_HZ = 1  # how many times per second to repaint the status line
@@ -66,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--volume", type=float, default=0.0, help="Minimum volume for a series (only used with --category)")
     parser.add_argument("--tickers", nargs="+", default=[], help="List of kalshi tickers to subscribe to")
     parser.add_argument("--ack-wait", type=int, default=15, help="Maximum amount of time to wait for a 'subscribed' acknowledgement from the server")
+    parser.add_argument("--flush-time", type=float, dest="FLUSH_TIME", default=1.0)
     # todo #9
 
     args = parser.parse_args()
@@ -121,21 +124,30 @@ signal.signal(signal.SIGUSR1, _force_rotation)
 
 
 async def writer_task(queue: asyncio.Queue, written: Counter) -> None:
-    f, current = None, None
+    f: TextIO | None = None
+    current: Path | None = None
+    last_flush = time.monotonic()
     try:
         while True:
-            ts, raw = await queue.get()
+            try:
+                ts, raw = await asyncio.wait_for(queue.get(), timeout=FLUSH_TIME)
+            except asyncio.TimeoutError:
+                if f:
+                    f.flush()
+                    last_flush = time.monotonic()
+                continue
             path = _data_path(ts)
-            if path != current:
+            if f is None or path != current:
                 if f:
                     f.close()
                 path.parent.mkdir(parents=True, exist_ok=True)
-                f, current = open(path, "a"), path  # noqa: ASYNC230, SIM115
-            assert f is not None
+                f = open(path, "a")  # noqa: ASYNC230, SIM115
+                current = path
             f.write(json.dumps({"timestamp": ts, "msg": raw}) + "\n")
             written["written"] += 1
-            if queue.empty():
+            if time.monotonic() - last_flush >= FLUSH_TIME:
                 f.flush()
+                last_flush = time.monotonic()
     finally:
         if f:
             f.close()
@@ -188,10 +200,8 @@ def classify_message(data: Any, msg: dict[str, str | int], msg_type: str, *, boo
         LOGGER.warning(f"\nUnhandled message type {msg_type!r}: {data}")
 
 
-async def _reset_ofi(states: dict[str, MarketState], interval: int):
-    while True:
-        await asyncio.sleep(interval)
-        {state.ofi.reset() for state in states.values()}
+async def _reset_ofi(states: dict[str, MarketState]):
+    {state.ofi.reset() for state in states.values()}
 
 
 async def display_loop(states: dict[str, MarketState], status: dict[str, str]) -> None:
@@ -243,7 +253,7 @@ def new_state(t: str) -> MarketState:
     return MarketState(ticker=t, book=OrderBook(t), ofi=OFITracker(), stats={"deltas": 0.0, "trades": 0.0, "last_trade": None})
 
 
-async def error_data_loop(errors: Counter, frames: Counter, written: Counter, queue: asyncio.Queue, *, loop_interval: int = 60):
+async def monitor_loop(errors: Counter, frames: Counter, written: Counter, queue: asyncio.Queue, *, loop_interval: int = 60):
     while True:
         await asyncio.sleep(loop_interval)
         LOGGER.info("errors=%s frames=%s written=%s queue_size=%d", dict(errors), dict(frames), dict(written), queue.qsize())
@@ -333,6 +343,15 @@ async def supervised_painter(states: dict[str, MarketState], status: dict[str, s
                 LOGGER.error("painter died and could not be restarted. continuing without the painter")
 
 
+async def every(interval: float, fn, args: dict[str, Any], name: str) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            fn(**args)
+        except Exception:
+            LOGGER.exception("periodic job %s failed", name)
+
+
 async def orderbook_websocket(tickers: list[str], ack_wait: int, ofi_interval: int = 10):
     retry_wait = 3
     max_retries = 5
@@ -343,10 +362,10 @@ async def orderbook_websocket(tickers: list[str], ack_wait: int, ofi_interval: i
     errors: Counter = Counter()
     frames: Counter = Counter()
     written: Counter = Counter()
-    ofi_refresher = asyncio.create_task(_reset_ofi(states, ofi_interval), name="ofi_refresher")
+    ofi_refresher = asyncio.create_task(every(ofi_interval, _reset_ofi, args={"states": states}, name="ofi"))
     writer = asyncio.create_task(supervised_writer(queue, written), name="writer")
     painter = asyncio.create_task(supervised_painter(states, status), name="painter")
-    error_reporter = asyncio.create_task(error_data_loop(errors, frames, written, queue))
+    error_reporter = asyncio.create_task(monitor_loop(errors, frames, written, queue), name="monitor")
     try:
         while True:
             if not KALSHI_ACCESS_KEY:
@@ -354,7 +373,7 @@ async def orderbook_websocket(tickers: list[str], ack_wait: int, ofi_interval: i
             ws_headers = create_headers(PRIVATE_KEY, "GET", "/trade-api/ws/v2", KALSHI_ACCESS_KEY)
             try:
                 async with websockets.connect(
-                    WS_URL, additional_headers=ws_headers, ping_interval=10, ping_timeout=20, open_timeout=10
+                    WS_URL, additional_headers=ws_headers, ping_interval=10, ping_timeout=20, open_timeout=10, proxy=True if WS_URL == DEFAULT_WS_URL else None
                 ) as websocket:  # this uses deflate compression; switch to none?
                     for t in tickers:  # fresh books, SAME dict object
                         states[t] = new_state(t)
@@ -398,6 +417,8 @@ def main():
     _verify_env()
     _write_pid()
     args = parse_args()
+    global FLUSH_TIME
+    FLUSH_TIME = args.FLUSH_TIME
     if args.file:
         book = OrderBook(market_ticker="replay")
         replay_json(args.file, book)
@@ -405,9 +426,14 @@ def main():
     if bool(args.category):
         series = get_series_list(args.category, bool(args.volume), args.volume)
         series = series[series["tickers"].str.contains(r"GAME|MATCH")]
-        markets = {series_ticker: get_live_markets(series_ticker) for series_ticker in series["tickers"]}
+        markets = fetch_markets(series["tickers"])
     elif args.series is not None:
-        markets = {args.series: get_live_markets(args.series)}
+        try:
+            value = get_live_markets(args.series)
+        except requests.RequestException:
+            LOGGER.critical(f"Series {args.series} could not be found at {WS_URL}. Terminating the program")
+            sys.exit(7)
+        markets = {args.series: value}
     elif args.tickers:
         markets = {match.group(1): [t for t in args.tickers if t.startswith(match.group(1))] for s in args.tickers if (match := re.search(r"^(\w+)(?=-)", s))}
     else:
